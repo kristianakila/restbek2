@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
-const fs = require('fs');
 const path = require('path');
 
 const app = express();
@@ -10,19 +9,23 @@ const app = express();
 // Конфигурация CORS
 app.use(cors({
   origin: function(origin, callback) {
-    if (process.env.NODE_ENV !== 'production') return callback(null, true);
-
+    // Разрешаем все origin в development
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    
+    // В production разрешаем только Telegram и ваши домены
     const allowedOrigins = [
       'https://web.telegram.org',
       'https://yourdomain.com',
       'https://*.yourdomain.com'
     ];
-
+    
     if (!origin || allowedOrigins.some(allowed => origin === allowed || origin.endsWith(allowed.slice(1)))) {
-      return callback(null, true);
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
     }
-
-    callback(new Error('Not allowed by CORS'));
   },
   credentials: true
 }));
@@ -30,68 +33,82 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-
-
-
-// === Инициализация Firebase ===
-let db;
+// Инициализация Firebase
 let firebaseInitialized = false;
 
 try {
-  const keyPath = path.join(__dirname, 'firebasekey.json');
-  console.log("🔐 Loading Firebase key from:", keyPath);
-
-  if (!fs.existsSync(keyPath)) {
-    console.error("❌ firebasekey.json NOT FOUND at:", keyPath);
-    process.exit(1);
+  // Для production - переменные окружения
+  if (process.env.FIREBASE_PRIVATE_KEY) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        type: "service_account",
+        project_id: process.env.FIREBASE_PROJECT_ID,
+        private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+        private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        client_email: process.env.FIREBASE_CLIENT_EMAIL,
+        client_id: process.env.FIREBASE_CLIENT_ID,
+        auth_uri: "https://accounts.google.com/o/oauth2/auth",
+        token_uri: "https://oauth2.googleapis.com/token",
+        auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+        client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
+        universe_domain: "googleapis.com"
+      })
+    });
+  } else {
+    // Для development - файл сервисного аккаунта
+    const serviceAccount = require('./serviceAccountKey.json');
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
   }
-
-  const serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
-
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
-
-  db = admin.firestore();
-  firebaseInitialized = true; // ✅ Флаг успешной инициализации
-  console.log("✅ Firebase initialized via firebasekey.json");
+  
+  firebaseInitialized = true;
+  console.log('✅ Firebase initialized successfully');
 } catch (error) {
-  console.error("❌ Firebase initialization error:", error);
-  firebaseInitialized = false; // ❌ Не удалось
+  console.error('❌ Firebase initialization error:', error);
   process.exit(1);
 }
 
+const db = admin.firestore();
 
-// === Глобальный кеш конфигурации ботов ===
+// Глобальный кеш конфигурации ботов
 const botConfigCache = new Map();
 const CACHE_TTL = 60000; // 1 минута
 
-// === Получение конфигурации бота с кешированием ===
+// Функция для получения конфигурации бота с кешированием
 async function getBotConfig(botId) {
-  if (!botId) throw new Error('Bot ID is required');
-
+  if (!botId) {
+    throw new Error('Bot ID is required');
+  }
+  
   // Проверяем кеш
   const cached = botConfigCache.get(botId);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return cached.config;
   }
-
+  
   try {
     const botRef = db.collection('bots').doc(botId);
     const botDoc = await botRef.get();
-
+    
     if (!botDoc.exists) {
       console.error(`Bot ${botId} not found in Firestore`);
       return null;
     }
-
+    
     const config = {
       id: botId,
       ...botDoc.data(),
+      // Добавляем токен из конфига или переменных окружения
       botToken: botDoc.data().botToken || process.env[`BOT_TOKEN_${botId}`] || process.env.BOT_TOKEN
     };
-
-    botConfigCache.set(botId, { config, timestamp: Date.now() });
+    
+    // Сохраняем в кеш
+    botConfigCache.set(botId, {
+      config,
+      timestamp: Date.now()
+    });
+    
     console.log(`✅ Loaded config for bot: ${botId}`);
     return config;
   } catch (error) {
@@ -99,9 +116,6 @@ async function getBotConfig(botId) {
     return null;
   }
 }
-
-module.exports = { app, getBotConfig, db };
-
 
 // Функция для получения пользователя
 async function getUserData(botId, userId) {
@@ -240,7 +254,6 @@ app.get('/health', (req, res) => {
     botsLoaded: botConfigCache.size
   });
 });
-
 
 // 1. Эндпоинт для проверки статуса пользователя
 app.post('/api/status', async (req, res) => {
