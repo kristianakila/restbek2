@@ -13,6 +13,9 @@ app.use(express.urlencoded({ extended: true }));
 // 🔥 ЖЕЛЕЗОБЕТОННАЯ ИНИЦИАЛИЗАЦИЯ FIREBASE ТОЛЬКО ЧЕРЕЗ firebasekey.json
 // =====================================================
 
+// Добавляем глобальную переменную для отслеживания состояния Firebase
+let firebaseInitialized = false;
+
 const serviceAccountPath = path.join(__dirname, "firebasekey.json");
 
 if (!fs.existsSync(serviceAccountPath)) {
@@ -22,25 +25,40 @@ if (!fs.existsSync(serviceAccountPath)) {
 
 const serviceAccount = require(serviceAccountPath);
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  projectId: serviceAccount.project_id,
-});
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    projectId: serviceAccount.project_id,
+  });
+  
+  firebaseInitialized = true;
+  console.log("✅ Firebase Admin инициализирован через firebasekey.json");
+} catch (error) {
+  console.error("❌ Ошибка инициализации Firebase:", error.message);
+  firebaseInitialized = false;
+}
 
-const db = admin.firestore();
+const db = firebaseInitialized ? admin.firestore() : null;
 
-db.settings({
-  ignoreUndefinedProperties: true,
-});
-
-console.log("✅ Firebase Admin инициализирован через firebasekey.json");
-console.log("🔥 Firestore готов к работе");
+if (db) {
+  db.settings({
+    ignoreUndefinedProperties: true,
+  });
+  console.log("🔥 Firestore готов к работе");
+} else {
+  console.error("❌ Firestore не инициализирован");
+}
 
 // =====================================================
 // 🚑 ПРОВЕРКА СОЕДИНЕНИЯ С FIRESTORE
 // =====================================================
 
 (async () => {
+  if (!firebaseInitialized || !db) {
+    console.error("❌ Firebase не инициализирован, пропускаем проверку соединения");
+    return;
+  }
+  
   try {
     console.log("🔍 Проверяем соединение с Firestore...");
 
@@ -53,10 +71,30 @@ console.log("🔥 Firestore готов к работе");
     console.log("✅ Firestore работает нормально");
   } catch (err) {
     console.error("❌ Firestore не отвечает:", err.message);
-    process.exit(1);
+    firebaseInitialized = false;
   }
 })();
 
+// Функция для повторной инициализации Firebase при необходимости
+function initializeFirebase() {
+  try {
+    if (!firebaseInitialized) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: serviceAccount.project_id,
+      });
+      
+      firebaseInitialized = true;
+      console.log("✅ Firebase повторно инициализирован");
+      return true;
+    }
+    return true;
+  } catch (error) {
+    console.error("❌ Ошибка повторной инициализации Firebase:", error.message);
+    firebaseInitialized = false;
+    return false;
+  }
+}
 
 // === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С FIREBASE ===
 
@@ -110,9 +148,14 @@ async function getBotConfig(botId) {
     console.error(`Error loading config for bot ${botId}:`, error.message);
     
     // Если это ошибка аутентификации, пробуем переинициализировать
-    if (error.code === 16) {
+    if (error.code === 16 || error.code === 7 || error.message.includes('auth')) {
       console.log(`🔄 Retrying Firebase initialization due to auth error...`);
       initializeFirebase();
+      
+      // Пробуем снова после повторной инициализации
+      if (firebaseInitialized) {
+        return getBotConfig(botId); // Рекурсивный вызов
+      }
     }
     
     return null;
@@ -135,6 +178,13 @@ async function getUserData(botId, userId) {
     return null;
   } catch (error) {
     console.error(`Error getting user ${userId} for bot ${botId}:`, error.message);
+    
+    // Пробуем повторную инициализацию при ошибках аутентификации
+    if (error.code === 16 || error.code === 7 || error.message.includes('auth')) {
+      console.log(`🔄 Retrying Firebase initialization...`);
+      initializeFirebase();
+    }
+    
     throw error;
   }
 }
@@ -187,6 +237,13 @@ async function createUser(botId, userId, userData) {
     return newUserData;
   } catch (error) {
     console.error(`Error creating user ${userId} for bot ${botId}:`, error.message);
+    
+    // Пробуем повторную инициализацию при ошибках аутентификации
+    if (error.code === 16 || error.code === 7 || error.message.includes('auth')) {
+      console.log(`🔄 Retrying Firebase initialization...`);
+      initializeFirebase();
+    }
+    
     throw error;
   }
 }
@@ -205,6 +262,15 @@ app.use((req, res, next) => {
 // Определение бота из запроса
 app.use(async (req, res, next) => {
   try {
+    // Если Firebase не инициализирован, возвращаем ошибку
+    if (!firebaseInitialized) {
+      console.error("Firebase not initialized in middleware");
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized. Please check server logs.'
+      });
+    }
+    
     let botId = null;
     
     // 1. Из поддомена
@@ -271,9 +337,11 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     firebase: firebaseInitialized ? 'connected' : 'disconnected',
+    firebase_initialized: firebaseInitialized,
     botsLoaded: botConfigCache.size,
     environment: process.env.NODE_ENV || 'development',
-    onRender: !!process.env.RENDER
+    onRender: !!process.env.RENDER,
+    server: 'Telegram Mini Apps Backend'
   });
 });
 
@@ -318,6 +386,14 @@ app.get('/api/firebase-status', async (req, res) => {
 // 1. Проверка статуса пользователя
 app.post('/api/status', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     const { user_id, username } = req.body;
     
     if (!req.botId || !req.botConfig) {
@@ -406,6 +482,14 @@ app.post('/api/status', async (req, res) => {
 // 2. Проверка подписки на канал
 app.post('/api/check-subscribe', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     const { user_id } = req.body;
     
     if (!req.botId || !req.botConfig) {
@@ -473,6 +557,14 @@ app.post('/api/check-subscribe', async (req, res) => {
 // 3. Получение конфигурации колеса
 app.get('/api/wheel-config', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     if (!req.botId || !req.botConfig) {
       return res.status(400).json({ error: 'Bot identification required' });
     }
@@ -523,6 +615,14 @@ app.get('/api/wheel-config', async (req, res) => {
 // 4. Вращение колеса (упрощенная версия)
 app.post('/api/spin', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized || !db) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     const { user_id, referrer_id, username } = req.body;
     
     if (!req.botId || !req.botConfig) {
@@ -641,10 +741,17 @@ app.post('/api/spin', async (req, res) => {
   }
 });
 
-
 // 5. Эндпоинт для отправки лида (контактных данных)
 app.post('/api/submit-lead', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized || !db) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     const { user_id, spin_id, name, phone } = req.body;
     
     if (!req.botId || !req.botConfig) {
@@ -764,6 +871,14 @@ app.post('/api/submit-lead', async (req, res) => {
 // 6. Фолбэк для лида (если пользователь не заполнил форму)
 app.post('/api/lead-fallback', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized || !db) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     const { user_id, spin_id } = req.body;
     
     if (!req.botId || !req.botConfig) {
@@ -818,6 +933,14 @@ app.post('/api/lead-fallback', async (req, res) => {
 // 7. Получение статистики бота
 app.get('/api/bot-stats', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized || !db) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     if (!req.botId || !req.botConfig) {
       return res.status(400).json({ error: 'Bot identification required' });
     }
@@ -893,6 +1016,14 @@ app.get('/api/bot-stats', async (req, res) => {
 // 8. Эндпоинт для получения информации о боте
 app.get('/api/bot-info', async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized) {
+      return res.status(503).json({ 
+        error: 'Service unavailable',
+        message: 'Firebase is not initialized'
+      });
+    }
+    
     if (!req.botId || !req.botConfig) {
       return res.status(400).json({ error: 'Bot identification required' });
     }
@@ -931,6 +1062,11 @@ app.get('/api/bot-info', async (req, res) => {
 // 9. Webhook для Telegram бота (опционально)
 app.post(`/webhook/:botId`, async (req, res) => {
   try {
+    // Проверяем инициализацию Firebase
+    if (!firebaseInitialized) {
+      return res.status(503).send('Firebase not initialized');
+    }
+    
     const botId = req.params.botId;
     const update = req.body;
     
@@ -1012,6 +1148,53 @@ app.get('/bot/:botId/app', async (req, res) => {
 // 12. Главная страница с информацией о ботах
 app.get('/', async (req, res) => {
   try {
+    // Если Firebase не инициализирован, показываем ошибку
+    if (!firebaseInitialized || !db) {
+      return res.status(503).send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Telegram Mini Apps Server - Error</title>
+            <style>
+              body { 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                max-width: 800px; 
+                margin: 0 auto; 
+                padding: 20px; 
+                line-height: 1.6;
+                background: #f5f5f5;
+                text-align: center;
+              }
+              .error { 
+                background: linear-gradient(135deg, #ff4444 0%, #cc0000 100%);
+                color: white;
+                padding: 40px;
+                border-radius: 10px;
+                margin-bottom: 30px;
+              }
+              .info {
+                background: white;
+                border-radius: 8px;
+                padding: 20px;
+                margin-top: 20px;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="error">
+              <h1>❌ Firebase Not Connected</h1>
+              <p>Firebase is not initialized or connection failed.</p>
+              <p>Please check server logs and firebasekey.json configuration.</p>
+            </div>
+            <div class="info">
+              <p>Server is running, but Firebase connection failed.</p>
+              <p>Check <a href="/health">/health</a> endpoint for more details.</p>
+            </div>
+          </body>
+        </html>
+      `);
+    }
+    
     // Получаем список всех ботов
     const botsSnapshot = await db.collection('bots').get();
     const bots = botsSnapshot.docs.map(doc => ({
