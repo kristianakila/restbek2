@@ -3,8 +3,105 @@ const admin = require("firebase-admin");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const cors = require("cors"); // Добавляем пакет cors
 
 const app = express();
+
+// =====================================================
+// 🌐 НАСТРОЙКА CORS - РАЗРЕШАЕМ ВСЁ!
+// =====================================================
+
+// Опция 1: Используем готовый middleware cors
+app.use(cors()); // Разрешает все CORS запросы по умолчанию
+
+// Опция 2: Кастомная настройка для полного контроля
+app.use((req, res, next) => {
+  // Разрешаем все домены
+  res.header("Access-Control-Allow-Origin", "*");
+  
+  // Разрешаем все методы
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
+  
+  // Разрешаем все заголовки
+  res.header("Access-Control-Allow-Headers", 
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization, x-auth-token, x-api-key, " +
+    "x-client-id, x-client-version, x-platform, x-app-version, x-device-id, x-session-id, " +
+    "x-timezone, x-language, x-user-agent, x-forwarded-for, x-real-ip, " +
+    "Access-Control-Allow-Origin, Access-Control-Allow-Headers, Access-Control-Allow-Methods"
+  );
+  
+  // Разрешаем куки и авторизацию
+  res.header("Access-Control-Allow-Credentials", "true");
+  
+  // Разрешаем кэширование preflight запросов на 24 часа
+  res.header("Access-Control-Max-Age", "86400");
+  
+  // Разрешаем экспозицию заголовков в браузере
+  res.header("Access-Control-Expose-Headers", 
+    "Content-Length, Content-Type, Authorization, X-Total-Count, X-Page-Count, " +
+    "X-Current-Page, X-Next-Page, X-Previous-Page"
+  );
+  
+  // Обрабатываем preflight запросы OPTIONS
+  if (req.method === "OPTIONS") {
+    console.log("🛫 Preflight CORS запрос от:", req.headers.origin || "неизвестный источник");
+    console.log("📋 Запрошенные заголовки:", req.headers["access-control-request-headers"]);
+    console.log("📋 Запрошенный метод:", req.headers["access-control-request-method"]);
+    
+    // Отправляем успешный ответ для preflight
+    return res.status(200).json({
+      message: "CORS preflight успешно пройден",
+      allowed: true,
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  // Продолжаем обработку основного запроса
+  next();
+});
+
+// =====================================================
+// 🪝 Middleware для логирования всех запросов
+// =====================================================
+
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  const originalSend = res.send;
+  
+  // Логируем запрос
+  console.log("🌐 Входящий запрос:", {
+    method: req.method,
+    url: req.originalUrl,
+    origin: req.headers.origin || "неизвестно",
+    ip: req.ip || req.connection.remoteAddress,
+    userAgent: req.headers["user-agent"]?.substring(0, 50) + "...",
+    timestamp: new Date().toISOString()
+  });
+  
+  // Перехватываем отправку ответа для логирования
+  res.send = function(body) {
+    const duration = Date.now() - startTime;
+    
+    console.log("📤 Исходящий ответ:", {
+      method: req.method,
+      url: req.originalUrl,
+      statusCode: res.statusCode,
+      duration: `${duration}ms`,
+      origin: req.headers.origin || "неизвестно",
+      timestamp: new Date().toISOString(),
+      cors: {
+        allowedOrigin: res.getHeader("Access-Control-Allow-Origin"),
+        allowedMethods: res.getHeader("Access-Control-Allow-Methods"),
+        allowedHeaders: res.getHeader("Access-Control-Allow-Headers")
+      }
+    });
+    
+    // Восстанавливаем оригинальный метод send
+    originalSend.call(this, body);
+  };
+  
+  next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -75,26 +172,40 @@ if (db) {
   }
 })();
 
-// Функция для повторной инициализации Firebase при необходимости
-function initializeFirebase() {
-  try {
-    if (!firebaseInitialized) {
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        projectId: serviceAccount.project_id,
-      });
-      
-      firebaseInitialized = true;
-      console.log("✅ Firebase повторно инициализирован");
-      return true;
-    }
-    return true;
-  } catch (error) {
-    console.error("❌ Ошибка повторной инициализации Firebase:", error.message);
-    firebaseInitialized = false;
-    return false;
-  }
-}
+// =====================================================
+// 🧪 ЭНДПОИНТ ДЛЯ ПРОВЕРКИ CORS И СЕРВЕРА
+// =====================================================
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "online",
+    message: "CORS-friendly Telegram Mini App Backend",
+    timestamp: new Date().toISOString(),
+    cors: {
+      enabled: true,
+      allowedOrigins: "* (все)",
+      allowedMethods: "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD",
+      allowedHeaders: "все заголовки разрешены",
+      credentials: "разрешены"
+    },
+    firebase: {
+      initialized: firebaseInitialized,
+      status: firebaseInitialized ? "готов к работе" : "ошибка инициализации"
+    },
+    endpoints: [
+      "/ - информация о сервере (эта страница)",
+      "/api/check-subscribe - проверка подписки",
+      "/api/status - статус пользователя",
+      "/api/spin - вращение колеса",
+      "/api/submit-lead - отправка лида",
+      "/api/lead-fallback - фолбэк для лида",
+      "/health - проверка здоровья сервера",
+      "/cors-test - тест CORS запросов"
+    ]
+  });
+});
+
+
 
 // === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С FIREBASE ===
 
