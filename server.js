@@ -1,160 +1,62 @@
-const express = require('express');
-const cors = require('cors');
-const admin = require('firebase-admin');
-const axios = require('axios');
-const path = require('path');
+const express = require("express");
+const admin = require("firebase-admin");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
-
-// Настройки CORS
-app.use(cors({
-  origin: function(origin, callback) {
-    // В продакшене разрешаем только определенные домены
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-    
-    const allowedOrigins = [
-      'https://web.telegram.org',
-      'https://yourdomain.com',
-      'https://*.yourdomain.com',
-      'https://restbek2.onrender.com' // Ваш Render домен
-    ];
-    
-    if (!origin || allowedOrigins.some(allowed => {
-      return origin === allowed || 
-             (allowed.startsWith('https://*.') && origin.endsWith(allowed.slice(9)));
-    })) {
-      return callback(null, true);
-    }
-    
-    callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true
-}));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// === ИНИЦИАЛИЗАЦИЯ FIREBASE ===
-let db;
-let firebaseInitialized = false;
+// =====================================================
+// 🔥 ЖЕЛЕЗОБЕТОННАЯ ИНИЦИАЛИЗАЦИЯ FIREBASE ТОЛЬКО ЧЕРЕЗ firebasekey.json
+// =====================================================
 
-const initializeFirebase = () => {
-  try {
-    console.log("🚀 Starting Firebase initialization...");
-    
-    // Проверяем, не инициализирован ли уже Firebase
-    if (admin.apps.length > 0) {
-      db = admin.firestore();
-      firebaseInitialized = true;
-      console.log("✅ Using existing Firebase app");
-      return;
-    }
-    
-    // Для Render используем base64 кодированный сервисный аккаунт
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
-      console.log("📁 Loading Firebase service account from base64...");
-      
-      try {
-        // Декодируем base64 в JSON
-        const serviceAccountJson = Buffer.from(
-          process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 
-          'base64'
-        ).toString('utf8');
-        
-        const serviceAccount = JSON.parse(serviceAccountJson);
-        
-        console.log("✅ Service account loaded successfully");
-        console.log("📊 Project ID:", serviceAccount.project_id);
-        console.log("👤 Client Email:", serviceAccount.client_email);
-        
-        // Инициализируем Firebase
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-          projectId: serviceAccount.project_id,
-          databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
-        });
-        
-      } catch (error) {
-        console.error("❌ Failed to parse service account:", error.message);
-        throw error;
-      }
-    } 
-    // Для локальной разработки (если нужно)
-    else if (process.env.NODE_ENV !== 'production') {
-      console.log("📁 Attempting to load firebasekey.json for local development...");
-      
-      try {
-        // Только для локальной разработки
-        const serviceAccount = require('./firebasekey.json');
-        
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-          projectId: serviceAccount.project_id
-        });
-        
-        console.log("✅ Firebase initialized for local development");
-      } catch (error) {
-        console.error("❌ Local Firebase initialization failed:", error.message);
-        console.log("ℹ️  Running without Firebase in local mode");
-        return;
-      }
-    } else {
-      throw new Error('No Firebase configuration found');
-    }
-    
-    // Инициализируем Firestore
-    db = admin.firestore();
-    
-    // Настройки Firestore
-    db.settings({
-      ignoreUndefinedProperties: true
-    });
-    
-    firebaseInitialized = true;
-    console.log("✅ Firebase Admin SDK initialized successfully!");
-    console.log("🔥 Firestore database ready");
-    
-    // Тестируем соединение асинхронно
-    testFirestoreConnection();
-    
-  } catch (error) {
-    console.error("❌ Firebase initialization failed:", error.message);
-    console.error("Error details:", {
-      code: error.code,
-      message: error.message
-    });
-    firebaseInitialized = false;
-  }
-};
+const serviceAccountPath = path.join(__dirname, "firebasekey.json");
 
-// Функция для тестирования соединения с Firestore
-async function testFirestoreConnection() {
-  if (!firebaseInitialized || !db) return;
-  
-  try {
-    console.log("🔍 Testing Firestore connection...");
-    
-    // Пробуем простой запрос на чтение
-    const testRef = db.collection('_healthcheck').doc('server');
-    await testRef.set({
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      server: 'telegram-mini-apps-server',
-      environment: process.env.NODE_ENV || 'development',
-      status: 'active',
-      lastCheck: new Date().toISOString()
-    }, { merge: true });
-    
-    console.log("✅ Firestore connection test passed!");
-  } catch (error) {
-    console.error("❌ Firestore connection test failed:", error.message);
-    console.error("Error code:", error.code);
-  }
+if (!fs.existsSync(serviceAccountPath)) {
+  console.error("❌ Файл firebasekey.json не найден:", serviceAccountPath);
+  process.exit(1);
 }
 
-// Инициализируем Firebase сразу
-initializeFirebase();
+const serviceAccount = require(serviceAccountPath);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  projectId: serviceAccount.project_id,
+});
+
+const db = admin.firestore();
+
+db.settings({
+  ignoreUndefinedProperties: true,
+});
+
+console.log("✅ Firebase Admin инициализирован через firebasekey.json");
+console.log("🔥 Firestore готов к работе");
+
+// =====================================================
+// 🚑 ПРОВЕРКА СОЕДИНЕНИЯ С FIRESTORE
+// =====================================================
+
+(async () => {
+  try {
+    console.log("🔍 Проверяем соединение с Firestore...");
+
+    await db.collection("_healthcheck").doc("server").set({
+      ok: true,
+      ts: admin.firestore.FieldValue.serverTimestamp(),
+      server: "telegram-mini-app-backend",
+    }, { merge: true });
+
+    console.log("✅ Firestore работает нормально");
+  } catch (err) {
+    console.error("❌ Firestore не отвечает:", err.message);
+    process.exit(1);
+  }
+})();
+
 
 // === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С FIREBASE ===
 
