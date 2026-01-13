@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
-const fs = require('fs');
 const path = require('path');
 
 const app = express();
@@ -10,15 +9,25 @@ const app = express();
 // Настройки CORS
 app.use(cors({
   origin: function(origin, callback) {
-    if (process.env.NODE_ENV !== 'production') return callback(null, true);
+    // В продакшене разрешаем только определенные домены
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    
     const allowedOrigins = [
       'https://web.telegram.org',
       'https://yourdomain.com',
-      'https://*.yourdomain.com'
+      'https://*.yourdomain.com',
+      'https://restbek2.onrender.com' // Ваш Render домен
     ];
-    if (!origin || allowedOrigins.some(allowed => origin === allowed || origin.endsWith(allowed.slice(1)))) {
+    
+    if (!origin || allowedOrigins.some(allowed => {
+      return origin === allowed || 
+             (allowed.startsWith('https://*.') && origin.endsWith(allowed.slice(9)));
+    })) {
       return callback(null, true);
     }
+    
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true
@@ -27,7 +36,7 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// === ПРОСТАЯ И НАДЕЖНАЯ ИНИЦИАЛИЗАЦИЯ FIREBASE ===
+// === ИНИЦИАЛИЗАЦИЯ FIREBASE ===
 let db;
 let firebaseInitialized = false;
 
@@ -43,81 +52,64 @@ const initializeFirebase = () => {
       return;
     }
     
-    // Определяем способ инициализации
-    const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
-    
-    if (isProduction) {
-      console.log("🔐 Production environment detected");
+    // Для Render используем base64 кодированный сервисный аккаунт
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+      console.log("📁 Loading Firebase service account from base64...");
       
-      // СПОСОБ 1: Используем переменную окружения с JSON сервисного аккаунта
-      if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        console.log("📁 Loading service account from environment variable");
-        try {
-          // Парсим JSON из переменной окружения
-          const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-          admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-            projectId: serviceAccount.project_id
-          });
-          console.log("✅ Firebase initialized from environment variable");
-        } catch (error) {
-          console.error("❌ Failed to parse service account from environment:", error.message);
-          throw error;
-        }
-      }
-      // СПОСОБ 2: Используем base64 кодированный JSON
-      else if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
-        console.log("📁 Loading service account from base64");
-        try {
-          const serviceAccountJson = Buffer.from(
-            process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 
-            'base64'
-          ).toString('utf8');
-          const serviceAccount = JSON.parse(serviceAccountJson);
-          admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-            projectId: serviceAccount.project_id
-          });
-          console.log("✅ Firebase initialized from base64");
-        } catch (error) {
-          console.error("❌ Failed to parse base64 service account:", error.message);
-          throw error;
-        }
-      }
-      // СПОСОБ 3: Используем Application Default Credentials (для Google Cloud)
-      else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-        console.log("📁 Using Application Default Credentials");
+      try {
+        // Декодируем base64 в JSON
+        const serviceAccountJson = Buffer.from(
+          process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 
+          'base64'
+        ).toString('utf8');
+        
+        const serviceAccount = JSON.parse(serviceAccountJson);
+        
+        console.log("✅ Service account loaded successfully");
+        console.log("📊 Project ID:", serviceAccount.project_id);
+        console.log("👤 Client Email:", serviceAccount.client_email);
+        
+        // Инициализируем Firebase
         admin.initializeApp({
-          credential: admin.applicationDefault()
+          credential: admin.credential.cert(serviceAccount),
+          projectId: serviceAccount.project_id,
+          databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
         });
-        console.log("✅ Firebase initialized with ADC");
-      } else {
-        throw new Error('No Firebase configuration found in production environment');
+        
+      } catch (error) {
+        console.error("❌ Failed to parse service account:", error.message);
+        throw error;
+      }
+    } 
+    // Для локальной разработки (если нужно)
+    else if (process.env.NODE_ENV !== 'production') {
+      console.log("📁 Attempting to load firebasekey.json for local development...");
+      
+      try {
+        // Только для локальной разработки
+        const serviceAccount = require('./firebasekey.json');
+        
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: serviceAccount.project_id
+        });
+        
+        console.log("✅ Firebase initialized for local development");
+      } catch (error) {
+        console.error("❌ Local Firebase initialization failed:", error.message);
+        console.log("ℹ️  Running without Firebase in local mode");
+        return;
       }
     } else {
-      // Локальная разработка - используем файл firebasekey.json
-      const keyPath = path.join(__dirname, 'firebasekey.json');
-      console.log("📁 Loading service account from file:", keyPath);
-      
-      if (!fs.existsSync(keyPath)) {
-        throw new Error(`firebasekey.json not found at: ${keyPath}`);
-      }
-      
-      const serviceAccount = require(keyPath);
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        projectId: serviceAccount.project_id
-      });
-      console.log("✅ Firebase initialized from local file");
+      throw new Error('No Firebase configuration found');
     }
     
     // Инициализируем Firestore
     db = admin.firestore();
     
-    // Настраиваем Firestore
+    // Настройки Firestore
     db.settings({
-      ignoreUndefinedProperties: true,
-      timestampsInSnapshots: true
+      ignoreUndefinedProperties: true
     });
     
     firebaseInitialized = true;
@@ -129,44 +121,39 @@ const initializeFirebase = () => {
     
   } catch (error) {
     console.error("❌ Firebase initialization failed:", error.message);
-    console.error("Error stack:", error.stack);
+    console.error("Error details:", {
+      code: error.code,
+      message: error.message
+    });
     firebaseInitialized = false;
   }
 };
 
 // Функция для тестирования соединения с Firestore
 async function testFirestoreConnection() {
-  if (!firebaseInitialized) return;
+  if (!firebaseInitialized || !db) return;
   
   try {
     console.log("🔍 Testing Firestore connection...");
     
-    // Пробуем простой запрос
-    const testRef = db.collection('_healthcheck').doc('server_test');
+    // Пробуем простой запрос на чтение
+    const testRef = db.collection('_healthcheck').doc('server');
     await testRef.set({
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
       server: 'telegram-mini-apps-server',
       environment: process.env.NODE_ENV || 'development',
-      status: 'active'
+      status: 'active',
+      lastCheck: new Date().toISOString()
     }, { merge: true });
     
     console.log("✅ Firestore connection test passed!");
   } catch (error) {
     console.error("❌ Firestore connection test failed:", error.message);
     console.error("Error code:", error.code);
-    
-    // Если это ошибка аутентификации, выводим подробности
-    if (error.code === 16) {
-      console.error("🔍 Authentication issue detected!");
-      console.error("Please check:");
-      console.error("1. Service account JSON format");
-      console.error("2. Service account has proper permissions");
-      console.error("3. Private key is correctly formatted");
-    }
   }
 }
 
-// Инициализируем Firebase сразу при запуске
+// Инициализируем Firebase сразу
 initializeFirebase();
 
 // === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С FIREBASE ===
