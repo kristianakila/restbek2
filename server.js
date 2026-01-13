@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
+const fs = require('fs');
 const path = require('path');
 
 const app = express();
@@ -9,23 +10,19 @@ const app = express();
 // Конфигурация CORS
 app.use(cors({
   origin: function(origin, callback) {
-    // Разрешаем все origin в development
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-    
-    // В production разрешаем только Telegram и ваши домены
+    if (process.env.NODE_ENV !== 'production') return callback(null, true);
+
     const allowedOrigins = [
       'https://web.telegram.org',
       'https://yourdomain.com',
       'https://*.yourdomain.com'
     ];
-    
+
     if (!origin || allowedOrigins.some(allowed => origin === allowed || origin.endsWith(allowed.slice(1)))) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+      return callback(null, true);
     }
+
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true
 }));
@@ -33,96 +30,60 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-
-
-
-// Инициализация Firebase через firebasekey.json
-let firebaseInitialized = false;
-
+// === Инициализация Firebase ===
+let db;
 try {
- const fs = require("fs");
-const path = require("path");
-
-// Инициализация Firebase через firebasekey.json
-let firebaseInitialized = false;
-
-try {
-  const keyPath = path.join(__dirname, "firebasekey.json");
-
+  const keyPath = path.join(__dirname, 'firebasekey.json');
   console.log("🔐 Loading Firebase key from:", keyPath);
-  const projectId = admin.app().options.credential.projectId;
-console.log("🧠 Firebase projectId from key:", projectId);
-
 
   if (!fs.existsSync(keyPath)) {
     console.error("❌ firebasekey.json NOT FOUND at:", keyPath);
     process.exit(1);
   }
 
-  const serviceAccount = JSON.parse(fs.readFileSync(keyPath, "utf8"));
+  const serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
 
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
 
-  firebaseInitialized = true;
+  db = admin.firestore();
   console.log("✅ Firebase initialized via firebasekey.json");
 } catch (error) {
   console.error("❌ Firebase initialization error:", error);
   process.exit(1);
 }
 
-
-  firebaseInitialized = true;
-  console.log('✅ Firebase initialized via firebasekey.json');
-} catch (error) {
-  console.error('❌ Firebase initialization error:', error);
-  process.exit(1);
-}
-
-
-
-
-const db = admin.firestore();
-
-// Глобальный кеш конфигурации ботов
+// === Глобальный кеш конфигурации ботов ===
 const botConfigCache = new Map();
 const CACHE_TTL = 60000; // 1 минута
 
-// Функция для получения конфигурации бота с кешированием
+// === Получение конфигурации бота с кешированием ===
 async function getBotConfig(botId) {
-  if (!botId) {
-    throw new Error('Bot ID is required');
-  }
-  
+  if (!botId) throw new Error('Bot ID is required');
+
   // Проверяем кеш
   const cached = botConfigCache.get(botId);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return cached.config;
   }
-  
+
   try {
     const botRef = db.collection('bots').doc(botId);
     const botDoc = await botRef.get();
-    
+
     if (!botDoc.exists) {
       console.error(`Bot ${botId} not found in Firestore`);
       return null;
     }
-    
+
     const config = {
       id: botId,
       ...botDoc.data(),
-      // Добавляем токен из конфига или переменных окружения
       botToken: botDoc.data().botToken || process.env[`BOT_TOKEN_${botId}`] || process.env.BOT_TOKEN
     };
-    
-    // Сохраняем в кеш
-    botConfigCache.set(botId, {
-      config,
-      timestamp: Date.now()
-    });
-    
+
+    botConfigCache.set(botId, { config, timestamp: Date.now() });
     console.log(`✅ Loaded config for bot: ${botId}`);
     return config;
   } catch (error) {
@@ -130,6 +91,9 @@ async function getBotConfig(botId) {
     return null;
   }
 }
+
+module.exports = { app, getBotConfig, db };
+
 
 // Функция для получения пользователя
 async function getUserData(botId, userId) {
