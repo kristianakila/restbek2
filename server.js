@@ -30,8 +30,13 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+
+
+
 // === Инициализация Firebase ===
 let db;
+let firebaseInitialized = false;
+
 try {
   const keyPath = path.join(__dirname, 'firebasekey.json');
   console.log("🔐 Loading Firebase key from:", keyPath);
@@ -48,11 +53,14 @@ try {
   });
 
   db = admin.firestore();
+  firebaseInitialized = true; // ✅ Флаг успешной инициализации
   console.log("✅ Firebase initialized via firebasekey.json");
 } catch (error) {
   console.error("❌ Firebase initialization error:", error);
+  firebaseInitialized = false; // ❌ Не удалось
   process.exit(1);
 }
+
 
 // === Глобальный кеш конфигурации ботов ===
 const botConfigCache = new Map();
@@ -232,6 +240,7 @@ app.get('/health', (req, res) => {
     botsLoaded: botConfigCache.size
   });
 });
+
 
 // 1. Эндпоинт для проверки статуса пользователя
 app.post('/api/status', async (req, res) => {
