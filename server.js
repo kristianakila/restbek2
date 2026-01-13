@@ -50,6 +50,9 @@ try {
   const keyPath = path.join(__dirname, "firebasekey.json");
 
   console.log("🔐 Loading Firebase key from:", keyPath);
+  const projectId = admin.app().options.credential.projectId;
+console.log("🧠 Firebase projectId from key:", projectId);
+
 
   if (!fs.existsSync(keyPath)) {
     console.error("❌ firebasekey.json NOT FOUND at:", keyPath);
