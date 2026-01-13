@@ -7,7 +7,7 @@ const path = require('path');
 
 const app = express();
 
-// Настройки CORS и middleware остаются без изменений
+// Настройки CORS
 app.use(cors({
   origin: function(origin, callback) {
     if (process.env.NODE_ENV !== 'production') return callback(null, true);
@@ -27,8 +27,7 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// === ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ FIREBASE ===
-// === ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ FIREBASE ===
+// === ПРОСТАЯ И НАДЕЖНАЯ ИНИЦИАЛИЗАЦИЯ FIREBASE ===
 let db;
 let firebaseInitialized = false;
 
@@ -44,126 +43,93 @@ const initializeFirebase = () => {
       return;
     }
     
-    let serviceAccount;
+    // Определяем способ инициализации
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
     
-    // ВАЖНО: Проверяем, работаем ли мы на Render
-    const isRender = process.env.RENDER || process.env.NODE_ENV === 'production';
-    
-    if (isRender) {
-      console.log("🔐 Production environment detected (Render)");
+    if (isProduction) {
+      console.log("🔐 Production environment detected");
       
-      // Вариант 1: Из закодированного в base64 JSON
-      if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
-        console.log("📁 Loading from FIREBASE_SERVICE_ACCOUNT_BASE64");
+      // СПОСОБ 1: Используем переменную окружения с JSON сервисного аккаунта
+      if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        console.log("📁 Loading service account from environment variable");
         try {
-          const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
-          const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf8');
-          serviceAccount = JSON.parse(serviceAccountJson);
-          console.log("✅ Successfully parsed base64 service account");
+          // Парсим JSON из переменной окружения
+          const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            projectId: serviceAccount.project_id
+          });
+          console.log("✅ Firebase initialized from environment variable");
+        } catch (error) {
+          console.error("❌ Failed to parse service account from environment:", error.message);
+          throw error;
+        }
+      }
+      // СПОСОБ 2: Используем base64 кодированный JSON
+      else if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+        console.log("📁 Loading service account from base64");
+        try {
+          const serviceAccountJson = Buffer.from(
+            process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 
+            'base64'
+          ).toString('utf8');
+          const serviceAccount = JSON.parse(serviceAccountJson);
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            projectId: serviceAccount.project_id
+          });
+          console.log("✅ Firebase initialized from base64");
         } catch (error) {
           console.error("❌ Failed to parse base64 service account:", error.message);
+          throw error;
         }
       }
-      // Вариант 2: Из полного JSON в переменной окружения
-      else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        console.log("📁 Loading from FIREBASE_SERVICE_ACCOUNT");
-        try {
-          // Исправляем форматирование приватного ключа
-          const serviceAccountStr = process.env.FIREBASE_SERVICE_ACCOUNT
-            .replace(/\\n/g, '\n')
-            .replace(/\\\\n/g, '\n');
-          serviceAccount = JSON.parse(serviceAccountStr);
-          console.log("✅ Successfully parsed service account");
-        } catch (error) {
-          console.error("❌ Failed to parse service account:", error.message);
-        }
-      }
-      // Вариант 3: Из отдельных переменных (НАИБОЛЕЕ НАДЕЖНЫЙ)
-      else if (process.env.FIREBASE_PRIVATE_KEY) {
-        console.log("📁 Loading from individual environment variables");
-        serviceAccount = {
-          type: 'service_account',
-          project_id: process.env.FIREBASE_PROJECT_ID,
-          private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-          private_key: process.env.FIREBASE_PRIVATE_KEY
-            .replace(/\\n/g, '\n')
-            .replace(/\\\\n/g, '\n'),
-          client_email: process.env.FIREBASE_CLIENT_EMAIL,
-          client_id: process.env.FIREBASE_CLIENT_ID,
-          auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-          token_uri: 'https://oauth2.googleapis.com/token',
-          auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
-          client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL
-        };
+      // СПОСОБ 3: Используем Application Default Credentials (для Google Cloud)
+      else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        console.log("📁 Using Application Default Credentials");
+        admin.initializeApp({
+          credential: admin.applicationDefault()
+        });
+        console.log("✅ Firebase initialized with ADC");
       } else {
-        console.error("❌ No Firebase configuration found in environment variables");
-        firebaseInitialized = false;
-        return;
+        throw new Error('No Firebase configuration found in production environment');
       }
     } else {
-      // Локальная разработка
+      // Локальная разработка - используем файл firebasekey.json
       const keyPath = path.join(__dirname, 'firebasekey.json');
-      console.log("📁 Loading from local file:", keyPath);
+      console.log("📁 Loading service account from file:", keyPath);
       
       if (!fs.existsSync(keyPath)) {
-        console.error("❌ firebasekey.json not found");
-        firebaseInitialized = false;
-        return;
+        throw new Error(`firebasekey.json not found at: ${keyPath}`);
       }
       
-      serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
-    }
-    
-    // Проверяем наличие обязательных полей
-    if (!serviceAccount || !serviceAccount.private_key) {
-      console.error("❌ Invalid service account configuration");
-      firebaseInitialized = false;
-      return;
-    }
-    
-    // ВАЖНО: Проверяем формат приватного ключа
-    if (!serviceAccount.private_key.includes('-----BEGIN PRIVATE KEY-----')) {
-      console.error("❌ Private key format is incorrect");
-      console.log("Private key preview:", serviceAccount.private_key.substring(0, 100));
-      firebaseInitialized = false;
-      return;
-    }
-    
-    console.log("🔧 Initializing Firebase with service account...");
-    console.log("📊 Project ID:", serviceAccount.project_id);
-    console.log("👤 Client Email:", serviceAccount.client_email);
-    
-    try {
-      // Инициализируем Firebase Admin SDK
+      const serviceAccount = require(keyPath);
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        projectId: serviceAccount.project_id,
-        databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+        projectId: serviceAccount.project_id
       });
-      
-      // Получаем экземпляр Firestore
-      db = admin.firestore();
-      
-      // Настройки Firestore для лучшей совместимости
-      db.settings({
-        ignoreUndefinedProperties: true
-      });
-      
-      firebaseInitialized = true;
-      console.log("✅ Firebase initialized successfully!");
-      console.log("🔥 Firestore database ready");
-      
-      // Тестовый запрос для проверки соединения (асинхронно)
-      testFirestoreConnection();
-      
-    } catch (error) {
-      console.error("❌ Firebase initialization error:", error.message);
-      console.error("Stack trace:", error.stack);
-      firebaseInitialized = false;
+      console.log("✅ Firebase initialized from local file");
     }
     
+    // Инициализируем Firestore
+    db = admin.firestore();
+    
+    // Настраиваем Firestore
+    db.settings({
+      ignoreUndefinedProperties: true,
+      timestampsInSnapshots: true
+    });
+    
+    firebaseInitialized = true;
+    console.log("✅ Firebase Admin SDK initialized successfully!");
+    console.log("🔥 Firestore database ready");
+    
+    // Тестируем соединение асинхронно
+    testFirestoreConnection();
+    
   } catch (error) {
-    console.error("❌ Unexpected error in Firebase initialization:", error);
+    console.error("❌ Firebase initialization failed:", error.message);
+    console.error("Error stack:", error.stack);
     firebaseInitialized = false;
   }
 };
@@ -175,35 +141,41 @@ async function testFirestoreConnection() {
   try {
     console.log("🔍 Testing Firestore connection...");
     
-    // Простой тестовый запрос без записи
-    const testRef = db.collection('_healthcheck').doc('connection_test');
-    const doc = await testRef.get();
-    
-    if (!doc.exists) {
-      console.log("📝 Test document doesn't exist, creating one...");
-      await testRef.set({
-        timestamp: new Date().toISOString(),
-        status: 'active',
-        server: 'telegram-mini-apps-server'
-      });
-    }
+    // Пробуем простой запрос
+    const testRef = db.collection('_healthcheck').doc('server_test');
+    await testRef.set({
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      server: 'telegram-mini-apps-server',
+      environment: process.env.NODE_ENV || 'development',
+      status: 'active'
+    }, { merge: true });
     
     console.log("✅ Firestore connection test passed!");
   } catch (error) {
     console.error("❌ Firestore connection test failed:", error.message);
     console.error("Error code:", error.code);
-    firebaseInitialized = false;
+    
+    // Если это ошибка аутентификации, выводим подробности
+    if (error.code === 16) {
+      console.error("🔍 Authentication issue detected!");
+      console.error("Please check:");
+      console.error("1. Service account JSON format");
+      console.error("2. Service account has proper permissions");
+      console.error("3. Private key is correctly formatted");
+    }
   }
 }
 
-// Инициализируем Firebase сразу
+// Инициализируем Firebase сразу при запуске
 initializeFirebase();
+
+// === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С FIREBASE ===
 
 // Глобальный кеш конфигурации ботов
 const botConfigCache = new Map();
 const CACHE_TTL = 60000; // 1 минута
 
-// Функция для получения конфигурации бота с кешированием
+// Получение конфигурации бота с кешированием
 async function getBotConfig(botId) {
   if (!botId) {
     throw new Error('Bot ID is required');
@@ -215,7 +187,14 @@ async function getBotConfig(botId) {
     return cached.config;
   }
   
+  // Проверяем инициализацию Firebase
+  if (!firebaseInitialized || !db) {
+    console.error(`Firebase not initialized for bot ${botId}`);
+    return null;
+  }
+  
   try {
+    console.log(`🔍 Fetching config for bot: ${botId}`);
     const botRef = db.collection('bots').doc(botId);
     const botDoc = await botRef.get();
     
@@ -227,7 +206,6 @@ async function getBotConfig(botId) {
     const config = {
       id: botId,
       ...botDoc.data(),
-      // Добавляем токен из конфига или переменных окружения
       botToken: botDoc.data().botToken || process.env[`BOT_TOKEN_${botId}`] || process.env.BOT_TOKEN
     };
     
@@ -240,13 +218,24 @@ async function getBotConfig(botId) {
     console.log(`✅ Loaded config for bot: ${botId}`);
     return config;
   } catch (error) {
-    console.error(`Error loading config for bot ${botId}:`, error);
+    console.error(`Error loading config for bot ${botId}:`, error.message);
+    
+    // Если это ошибка аутентификации, пробуем переинициализировать
+    if (error.code === 16) {
+      console.log(`🔄 Retrying Firebase initialization due to auth error...`);
+      initializeFirebase();
+    }
+    
     return null;
   }
 }
 
-// Функция для получения пользователя
+// Получение данных пользователя
 async function getUserData(botId, userId) {
+  if (!firebaseInitialized || !db) {
+    throw new Error('Firebase not initialized');
+  }
+  
   try {
     const userRef = db.collection('bots').doc(botId).collection('users').doc(String(userId));
     const userDoc = await userRef.get();
@@ -256,13 +245,17 @@ async function getUserData(botId, userId) {
     }
     return null;
   } catch (error) {
-    console.error(`Error getting user ${userId} for bot ${botId}:`, error);
+    console.error(`Error getting user ${userId} for bot ${botId}:`, error.message);
     throw error;
   }
 }
 
-// Функция для создания нового пользователя
+// Создание нового пользователя
 async function createUser(botId, userId, userData) {
+  if (!firebaseInitialized || !db) {
+    throw new Error('Firebase not initialized');
+  }
+  
   try {
     const userRef = db.collection('bots').doc(botId).collection('users').doc(String(userId));
     const today = new Date().toDateString();
@@ -285,7 +278,7 @@ async function createUser(botId, userId, userData) {
       dailyStats: {
         [today]: { spins: 0 }
       },
-      attempts_left: 3, // По умолчанию
+      attempts_left: 3,
       lastSpin: null,
       referrals: 0,
       ref_link: `https://t.me/${userData.bot_username || 'bot'}?start=uid_${userId}`,
@@ -297,19 +290,26 @@ async function createUser(botId, userId, userData) {
     // Обновляем счетчик пользователей бота
     const botRef = db.collection('bots').doc(botId);
     await botRef.update({
-      usersCount: admin.firestore.FieldValue.increment(1)
+      usersCount: admin.firestore.FieldValue.increment(1),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
     
+    console.log(`✅ Created new user: ${userId} for bot: ${botId}`);
     return newUserData;
   } catch (error) {
-    console.error(`Error creating user ${userId} for bot ${botId}:`, error);
+    console.error(`Error creating user ${userId} for bot ${botId}:`, error.message);
     throw error;
   }
 }
 
-// Миддлварь для логирования
+// === MIDDLEWARE ===
+
+// Логирование запросов
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`, req.query);
+  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`, {
+    query: req.query,
+    botId: req.headers['x-bot-id'] || 'none'
+  });
   next();
 });
 
@@ -318,7 +318,7 @@ app.use(async (req, res, next) => {
   try {
     let botId = null;
     
-    // 1. Из поддомена (bot1.domain.com)
+    // 1. Из поддомена
     const hostname = req.hostname;
     if (hostname.includes('.')) {
       const subdomain = hostname.split('.')[0];
@@ -327,23 +327,22 @@ app.use(async (req, res, next) => {
       }
     }
     
-    // 2. Из пути (/bot1/api/...)
+    // 2. Из пути (/bot/botId/...)
     if (!botId && req.path.startsWith('/bot/')) {
       const pathParts = req.path.split('/');
       if (pathParts[2]) {
         botId = pathParts[2];
-        // Редактируем путь для следующих middleware
         req.originalPath = req.path;
         req.path = '/' + pathParts.slice(3).join('/');
       }
     }
     
-    // 3. Из query параметра (?bot_id=bot123)
+    // 3. Из query параметра
     if (!botId && req.query.bot_id) {
       botId = req.query.bot_id;
     }
     
-    // 4. Из заголовка (X-Bot-ID)
+    // 4. Из заголовка
     if (!botId && req.headers['x-bot-id']) {
       botId = req.headers['x-bot-id'];
     }
@@ -361,7 +360,7 @@ app.use(async (req, res, next) => {
       } else {
         return res.status(404).json({ 
           error: 'Bot not found',
-          message: `Bot with ID "${botId}" does not exist`
+          message: `Bot with ID "${botId}" does not exist or Firebase is not connected`
         });
       }
     }
@@ -369,21 +368,65 @@ app.use(async (req, res, next) => {
     next();
   } catch (error) {
     console.error('Error in bot detection middleware:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+      error: 'Internal server error',
+      details: error.message 
+    });
   }
 });
 
-// Эндпоинт для проверки статуса сервера
+// === HEALTH CHECK И ДИАГНОСТИКА ===
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     firebase: firebaseInitialized ? 'connected' : 'disconnected',
-    botsLoaded: botConfigCache.size
+    botsLoaded: botConfigCache.size,
+    environment: process.env.NODE_ENV || 'development',
+    onRender: !!process.env.RENDER
   });
 });
 
-// 1. Эндпоинт для проверки статуса пользователя
+app.get('/api/firebase-status', async (req, res) => {
+  try {
+    let firestoreStatus = 'unknown';
+    let testResult = null;
+    
+    if (firebaseInitialized && db) {
+      try {
+        const testRef = db.collection('_healthcheck').doc('status_check');
+        const doc = await testRef.get();
+        firestoreStatus = 'connected';
+        testResult = {
+          exists: doc.exists,
+          data: doc.exists ? doc.data() : null
+        };
+      } catch (error) {
+        firestoreStatus = `error: ${error.message}`;
+      }
+    }
+    
+    res.json({
+      firebase_initialized: firebaseInitialized,
+      firestore_status: firestoreStatus,
+      test_result: testResult,
+      environment: process.env.NODE_ENV || 'development',
+      on_render: !!process.env.RENDER,
+      bots_in_cache: botConfigCache.size,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      firebase_initialized: firebaseInitialized
+    });
+  }
+});
+
+// === API ENDPOINTS ===
+
+// 1. Проверка статуса пользователя
 app.post('/api/status', async (req, res) => {
   try {
     const { user_id, username } = req.body;
@@ -413,7 +456,6 @@ app.post('/api/status', async (req, res) => {
       userData = userDoc.data();
       console.log(`[${botId}] User ${user_id} found in database`);
     } else {
-      // Создаем нового пользователя
       console.log(`[${botId}] Creating new user: ${user_id}`);
       userData = await createUser(botId, user_id, {
         username: username || '',
@@ -472,7 +514,7 @@ app.post('/api/status', async (req, res) => {
   }
 });
 
-// 2. Эндпоинт для проверки подписки на канал
+// 2. Проверка подписки на канал
 app.post('/api/check-subscribe', async (req, res) => {
   try {
     const { user_id } = req.body;
@@ -488,12 +530,9 @@ app.post('/api/check-subscribe', async (req, res) => {
     const botId = req.botId;
     const botConfig = req.botConfig;
     
-    console.log(`[${botId}] Checking subscription for user: ${user_id}`);
-    
     const channelUsername = botConfig.subscription?.channelUsername;
     const requireSubscription = botConfig.features?.requireSubscription;
     
-    // Если подписка не требуется
     if (!requireSubscription || !channelUsername) {
       return res.json({ 
         subscribed: true,
@@ -502,10 +541,8 @@ app.post('/api/check-subscribe', async (req, res) => {
       });
     }
     
-    // Проверяем подписку через Telegram Bot API
     const botToken = botConfig.botToken;
     if (!botToken) {
-      console.error(`[${botId}] No bot token configured`);
       return res.json({ subscribed: false });
     }
     
@@ -524,23 +561,13 @@ app.post('/api/check-subscribe', async (req, res) => {
       const status = response.data.result.status;
       const isSubscribed = ['creator', 'administrator', 'member', 'restricted'].includes(status);
       
-      console.log(`[${botId}] User ${user_id} subscription status: ${status} (subscribed: ${isSubscribed})`);
-      
       res.json({ 
         subscribed: isSubscribed,
         channel: channelUsername,
         status: status
       });
     } catch (error) {
-      console.error(`[${botId}] Error checking subscription for user ${user_id}:`, error.response?.data || error.message);
-      
-      // Если канал не найден или бот не админ, считаем что подписан
-      if (error.response?.data?.description?.includes('chat not found') ||
-          error.response?.data?.description?.includes('bot is not a member')) {
-        console.warn(`[${botId}] Channel issue, assuming subscribed`);
-        return res.json({ subscribed: true, channel: channelUsername, warning: 'Channel access issue' });
-      }
-      
+      console.error(`[${botId}] Error checking subscription:`, error.message);
       res.json({ 
         subscribed: false,
         channel: channelUsername,
@@ -554,7 +581,7 @@ app.post('/api/check-subscribe', async (req, res) => {
   }
 });
 
-// 3. Эндпоинт для получения конфигурации колеса
+// 3. Получение конфигурации колеса
 app.get('/api/wheel-config', async (req, res) => {
   try {
     if (!req.botId || !req.botConfig) {
@@ -564,11 +591,8 @@ app.get('/api/wheel-config', async (req, res) => {
     const botId = req.botId;
     const botConfig = req.botConfig;
     
-    console.log(`[${botId}] Getting wheel config`);
-    
     const prizes = botConfig.wheel?.prizes || [];
     
-    // Преобразуем призы в формат для HTML
     const items = prizes
       .filter(prize => prize.isAvailable !== false)
       .map((prize, index) => ({
@@ -581,7 +605,6 @@ app.get('/api/wheel-config', async (req, res) => {
         color: prize.color || '#B31414'
       }));
     
-    // Если нет призов, создаем дефолтные
     if (items.length === 0) {
       items.push(
         { id: 1, label: '10 баллов', win_text: 'Поздравляем! Вы выиграли 10 баллов!', value: 10, probability: 0.3, type: 'points', color: '#ef4444' },
@@ -608,7 +631,7 @@ app.get('/api/wheel-config', async (req, res) => {
   }
 });
 
-// 4. Эндпоинт для вращения колеса
+// 4. Вращение колеса (упрощенная версия)
 app.post('/api/spin', async (req, res) => {
   try {
     const { user_id, referrer_id, username } = req.body;
@@ -624,18 +647,15 @@ app.post('/api/spin', async (req, res) => {
     const botId = req.botId;
     const botConfig = req.botConfig;
     
-    console.log(`[${botId}] Spin request from user: ${user_id}, referrer: ${referrer_id || 'none'}`);
-    
-    const botRef = db.collection('bots').doc(botId);
-    const userRef = botRef.collection('users').doc(String(user_id));
-    
-    const [botDoc, userDoc] = await Promise.all([
-      botRef.get(),
-      userRef.get()
-    ]);
-    
-    if (!userDoc.exists) {
-      return res.status(404).json({ error: 'Пользователь не найден' });
+    // Проверяем наличие пользователя
+    let userDoc = await getUserData(botId, user_id);
+    if (!userDoc || !userDoc.exists) {
+      // Создаем пользователя если не существует
+      await createUser(botId, user_id, {
+        username: username || '',
+        bot_username: botConfig.botUsername
+      });
+      userDoc = await getUserData(botId, user_id);
     }
     
     const userData = userDoc.data();
@@ -660,64 +680,7 @@ app.post('/api/spin', async (req, res) => {
       });
     }
     
-    // Проверка кулдауна
-    if (userData.lastSpin) {
-      const lastSpinTime = userData.lastSpin.toDate ? 
-        userData.lastSpin.toDate().getTime() : 
-        new Date(userData.lastSpin).getTime();
-      const cooldownSeconds = botConfig.limits?.cooldownSeconds || 3600;
-      const cooldownEnd = lastSpinTime + (cooldownSeconds * 1000);
-      
-      if (Date.now() < cooldownEnd) {
-        const remaining = Math.ceil((cooldownEnd - Date.now()) / 1000);
-        return res.status(400).json({ 
-          error: `Следующий спин через: ${remaining} сек.`,
-          cooldown_remaining: remaining
-        });
-      }
-    }
-    
-    // Обработка реферера
-    if (referrer_id && String(referrer_id) !== String(user_id) && !userData.referrer_processed) {
-      const referrerRef = botRef.collection('users').doc(String(referrer_id));
-      const referrerDoc = await referrerRef.get();
-      
-      if (referrerDoc.exists) {
-        try {
-          await referrerRef.update({
-            invitedUsers: admin.firestore.FieldValue.arrayUnion(user_id),
-            referrals: admin.firestore.FieldValue.increment(1),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          });
-          
-          // Даем бонус рефереру (например, дополнительную попытку)
-          const referrerUpdate = {};
-          const referralReward = botConfig.referral?.rewardType;
-          
-          if (referralReward === 'extra_spin') {
-            // Можно добавить логику для бонусных спинов
-            referrerUpdate.referral_bonus_spins = admin.firestore.FieldValue.increment(1);
-          }
-          
-          if (Object.keys(referrerUpdate).length > 0) {
-            await referrerRef.update(referrerUpdate);
-          }
-          
-          // Отмечаем, что реферер обработан
-          await userRef.update({
-            referrer_processed: true,
-            referrer_id: referrer_id,
-            referred_by: referrer_id
-          });
-          
-          console.log(`[${botId}] User ${user_id} referred by ${referrer_id}`);
-        } catch (error) {
-          console.error(`[${botId}] Error processing referrer:`, error);
-        }
-      }
-    }
-    
-    // Выбор приза на основе вероятности
+    // Выбор приза
     const availablePrizes = (botConfig.wheel?.prizes || []).filter(p => p.isAvailable !== false);
     if (availablePrizes.length === 0) {
       return res.status(400).json({ error: 'Нет доступных призов' });
@@ -735,10 +698,8 @@ app.post('/api/spin', async (req, res) => {
       random -= (prize.probability || 0);
     }
     
-    // Генерация уникального ID спина
+    // Сохраняем спин
     const spin_id = `spin_${Date.now()}_${user_id}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Подготовка записи спина
     const spinRecord = {
       spin_id,
       user_id: String(user_id),
@@ -751,61 +712,21 @@ app.post('/api/spin', async (req, res) => {
       bot_id: botId
     };
     
-    // Транзакция для сохранения спина
-    await db.runTransaction(async (transaction) => {
-      // Обновляем данные пользователя
-      transaction.update(userRef, {
-        spins: admin.firestore.FieldValue.arrayUnion(spinRecord),
-        totalSpins: admin.firestore.FieldValue.increment(1),
-        lastSpin: admin.firestore.FieldValue.serverTimestamp(),
-        [`dailyStats.${today}.spins`]: admin.firestore.FieldValue.increment(1),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      
-      // Обновляем статистику бота
-      transaction.update(botRef, {
-        totalSpins: admin.firestore.FieldValue.increment(1),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
+    const userRef = db.collection('bots').doc(botId).collection('users').doc(String(user_id));
+    const botRef = db.collection('bots').doc(botId);
+    
+    await userRef.update({
+      spins: admin.firestore.FieldValue.arrayUnion(spinRecord),
+      totalSpins: admin.firestore.FieldValue.increment(1),
+      lastSpin: admin.firestore.FieldValue.serverTimestamp(),
+      [`dailyStats.${today}.spins`]: admin.firestore.FieldValue.increment(1),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
     
-    // Если приз не "none" типа, сохраняем его отдельно
-    if (selectedPrize.type !== 'none') {
-      const prizeRecord = {
-        ...spinRecord,
-        claimDate: null,
-        expiryDate: new Date(Date.now() + ((botConfig.limits?.prizeExpiryDays || 7) * 24 * 60 * 60 * 1000)),
-        status: 'won'
-      };
-      
-      await userRef.update({
-        prizes: admin.firestore.FieldValue.arrayUnion(prizeRecord),
-        totalPrizes: admin.firestore.FieldValue.increment(1)
-      });
-      
-      await botRef.update({
-        totalPrizes: admin.firestore.FieldValue.increment(1)
-      });
-      
-      // Отправляем уведомление в Telegram
-      const botToken = botConfig.botToken;
-      if (botToken && botConfig.notifications?.prizeWon) {
-        try {
-          await axios.post(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            chat_id: user_id,
-            text: `🎉 *Поздравляем!*\n\nВы выиграли: *${selectedPrize.text}*\n\nПриз будет действителен до ${new Date(Date.now() + ((botConfig.limits?.prizeExpiryDays || 7) * 24 * 60 * 60 * 1000)).toLocaleDateString('ru-RU')}\n\nID приза: ${spin_id}`,
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [[
-                { text: '🎡 Крутить еще', callback_data: 'spin_again' }
-              ]]
-            }
-          });
-        } catch (error) {
-          console.error(`[${botId}] Error sending Telegram notification:`, error.message);
-        }
-      }
-    }
+    await botRef.update({
+      totalSpins: admin.firestore.FieldValue.increment(1),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
     
     const newAttemptsLeft = Math.max(0, maxSpins - (spinsToday + 1));
     
@@ -819,8 +740,7 @@ app.post('/api/spin', async (req, res) => {
       attempts_left: newAttemptsLeft,
       spins_today: spinsToday + 1,
       total_spins: (userData.totalSpins || 0) + 1,
-      cooldown: botConfig.limits?.cooldownSeconds || 3600,
-      expiry_days: botConfig.limits?.prizeExpiryDays || 7
+      cooldown: botConfig.limits?.cooldownSeconds || 3600
     });
     
   } catch (error) {
@@ -831,6 +751,7 @@ app.post('/api/spin', async (req, res) => {
     });
   }
 });
+
 
 // 5. Эндпоинт для отправки лида (контактных данных)
 app.post('/api/submit-lead', async (req, res) => {
