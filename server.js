@@ -40,11 +40,35 @@ app.use(express.urlencoded({ extended: true }));
 let firebaseInitialized = false;
 
 try {
-  const serviceAccount = require('./firebasekey.json');
+ const fs = require("fs");
+const path = require("path");
+
+// Инициализация Firebase через firebasekey.json
+let firebaseInitialized = false;
+
+try {
+  const keyPath = path.join(__dirname, "firebasekey.json");
+
+  console.log("🔐 Loading Firebase key from:", keyPath);
+
+  if (!fs.existsSync(keyPath)) {
+    console.error("❌ firebasekey.json NOT FOUND at:", keyPath);
+    process.exit(1);
+  }
+
+  const serviceAccount = JSON.parse(fs.readFileSync(keyPath, "utf8"));
 
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
+
+  firebaseInitialized = true;
+  console.log("✅ Firebase initialized via firebasekey.json");
+} catch (error) {
+  console.error("❌ Firebase initialization error:", error);
+  process.exit(1);
+}
+
 
   firebaseInitialized = true;
   console.log('✅ Firebase initialized via firebasekey.json');
