@@ -2,30 +2,24 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
+const fs = require('fs');
 const path = require('path');
 
 const app = express();
 
-// Конфигурация CORS
+// Настройки CORS и middleware остаются без изменений
 app.use(cors({
   origin: function(origin, callback) {
-    // Разрешаем все origin в development
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-    
-    // В production разрешаем только Telegram и ваши домены
+    if (process.env.NODE_ENV !== 'production') return callback(null, true);
     const allowedOrigins = [
       'https://web.telegram.org',
       'https://yourdomain.com',
       'https://*.yourdomain.com'
     ];
-    
     if (!origin || allowedOrigins.some(allowed => origin === allowed || origin.endsWith(allowed.slice(1)))) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+      return callback(null, true);
     }
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true
 }));
@@ -33,43 +27,138 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Инициализация Firebase
+// === ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ FIREBASE ===
+let db;
 let firebaseInitialized = false;
+let firebaseApp;
 
-try {
-  // Для production - переменные окружения
-  if (process.env.FIREBASE_PRIVATE_KEY) {
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        type: "service_account",
-        project_id: process.env.FIREBASE_PROJECT_ID,
-        private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-        private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        client_email: process.env.FIREBASE_CLIENT_EMAIL,
-        client_id: process.env.FIREBASE_CLIENT_ID,
-        auth_uri: "https://accounts.google.com/o/oauth2/auth",
-        token_uri: "https://oauth2.googleapis.com/token",
-        auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
-        client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
-        universe_domain: "googleapis.com"
-      })
+const initializeFirebase = async () => {
+  try {
+    console.log("🚀 Starting Firebase initialization...");
+    
+    // Проверяем, не инициализирован ли уже Firebase
+    if (admin.apps.length > 0) {
+      firebaseApp = admin.app();
+      db = admin.firestore();
+      console.log("✅ Using existing Firebase app");
+      firebaseInitialized = true;
+      return;
+    }
+    
+    // Определяем источник конфигурации
+    let serviceAccount;
+    
+    if (process.env.RENDER || process.env.NODE_ENV === 'production') {
+      console.log("🔐 Production environment detected");
+      
+      // Вариант 1: Из закодированного в base64 JSON в переменной окружения
+      if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+        console.log("📁 Loading from FIREBASE_SERVICE_ACCOUNT_BASE64");
+        const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
+        const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf8');
+        serviceAccount = JSON.parse(serviceAccountJson);
+      }
+      // Вариант 2: Из полного JSON в переменной окружения
+      else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        console.log("📁 Loading from FIREBASE_SERVICE_ACCOUNT");
+        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT.replace(/\\n/g, '\n'));
+      }
+      // Вариант 3: Из отдельных переменных
+      else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_PRIVATE_KEY) {
+        console.log("📁 Loading from individual environment variables");
+        serviceAccount = {
+          type: 'service_account',
+          project_id: process.env.FIREBASE_PROJECT_ID,
+          private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+          private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+          client_email: process.env.FIREBASE_CLIENT_EMAIL || `firebase-adminsdk@${process.env.FIREBASE_PROJECT_ID}.iam.gserviceaccount.com`,
+          client_id: process.env.FIREBASE_CLIENT_ID,
+          auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+          token_uri: 'https://oauth2.googleapis.com/token',
+          auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
+          client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL || `https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk%40${process.env.FIREBASE_PROJECT_ID}.iam.gserviceaccount.com`
+        };
+      }
+      // Вариант 4: Используем Application Default Credentials
+      else {
+        console.log("🔑 Using Application Default Credentials");
+        // Google Cloud автоматически найдет учетные данные
+        firebaseApp = admin.initializeApp({
+          projectId: process.env.FIREBASE_PROJECT_ID
+        });
+        db = admin.firestore(firebaseApp);
+        
+        // Настраиваем Firestore
+        db.settings({
+          ignoreUndefinedProperties: true
+        });
+        
+        firebaseInitialized = true;
+        console.log("✅ Firebase initialized with Application Default Credentials");
+        return;
+      }
+    } else {
+      // Локальная разработка
+      const keyPath = path.join(__dirname, 'firebasekey.json');
+      console.log("📁 Loading from local file:", keyPath);
+      
+      if (!fs.existsSync(keyPath)) {
+        throw new Error('firebasekey.json not found');
+      }
+      
+      serviceAccount = JSON.parse(fs.readFileSync(keyPath, 'utf8'));
+    }
+    
+    // Инициализируем с сервисным аккаунтом
+    console.log("🔧 Initializing Firebase with service account...");
+    console.log("📊 Project ID:", serviceAccount.project_id);
+    console.log("👤 Client Email:", serviceAccount.client_email);
+    
+    firebaseApp = admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: serviceAccount.project_id,
+      databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
     });
-  } else {
-    // Для development - файл сервисного аккаунта
-    const serviceAccount = require('./serviceAccountKey.json');
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
+    
+    db = admin.firestore(firebaseApp);
+    
+    // Настройки Firestore
+    db.settings({
+      ignoreUndefinedProperties: true,
+      timestampsInSnapshots: true
     });
+    
+    // Тестовое соединение
+    console.log("🔍 Testing Firestore connection...");
+    await db.collection('_healthcheck').doc('test').set({
+      timestamp: new Date().toISOString(),
+      status: 'ok'
+    });
+    
+    console.log("✅ Test document written successfully");
+    
+    firebaseInitialized = true;
+    console.log("✅ Firebase initialized successfully");
+    
+  } catch (error) {
+    console.error("❌ Firebase initialization error:", error);
+    console.error("🔍 Error details:", {
+      code: error.code,
+      message: error.message,
+      stack: error.stack
+    });
+    
+    firebaseInitialized = false;
+    
+    // Не завершаем процесс в продакшене, пробуем переподключиться позже
+    if (process.env.NODE_ENV !== 'production') {
+      throw error;
+    }
   }
-  
-  firebaseInitialized = true;
-  console.log('✅ Firebase initialized successfully');
-} catch (error) {
-  console.error('❌ Firebase initialization error:', error);
-  process.exit(1);
-}
+};
 
-const db = admin.firestore();
+// Инициализируем Firebase сразу
+initializeFirebase();
 
 // Глобальный кеш конфигурации ботов
 const botConfigCache = new Map();
