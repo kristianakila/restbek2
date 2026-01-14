@@ -1,4 +1,4 @@
-// services/firebaseService.js - исправленная версия
+// services/firebaseService.js - полностью исправленная версия
 const admin = require("firebase-admin");
 const path = require("path");
 const fs = require("fs");
@@ -11,7 +11,7 @@ let firebaseInitialized = false;
  * Инициализация Firebase
  * @returns {Promise<boolean>} Успешна ли инициализация
  */
-async function initializeFirebase() {  // ДОБАВЬ async здесь!
+async function initializeFirebase() {
   try {
     console.log("🔥 Начинаем инициализацию Firebase...");
     
@@ -75,13 +75,10 @@ async function initializeFirebase() {  // ДОБАВЬ async здесь!
       timestampsInSnapshots: true
     });
     
-    // Тестовое соединение - УБЕРИТЕ await или сделайте вызов без await
-    // Но сначала просто попробуйте подключиться без тестового запроса
     console.log("🔄 Подключаемся к Firestore...");
     
     // Простая проверка подключения
     try {
-      // Просто получаем доступ к коллекции, не создавая документ
       await firestore.listCollections();
       console.log("✅ Firestore успешно подключен");
       
@@ -145,11 +142,11 @@ async function getBotConfig(botId) {
 }
 
 /**
- * Получение данных пользователя
+ * Получение данных пользователя (ИСПРАВЛЕННАЯ ВЕРСИЯ)
  */
 async function getUserData(botId, userId) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, возвращаем null");
       return null;
     }
@@ -168,10 +165,46 @@ async function getUserData(botId, userId) {
     }
 
     const data = userDoc.data();
-    console.log(`✅ Данные пользователя ${userId} загружены`);
-    return data;
+    
+    // Вычисляем количество спинов за сегодня
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let spinsToday = 0;
+    
+    if (data.spins && Array.isArray(data.spins)) {
+      spinsToday = data.spins.filter(spin => {
+        if (!spin.timestamp) return false;
+        try {
+          const spinDate = new Date(spin.timestamp);
+          return spinDate >= today;
+        } catch (e) {
+          return false;
+        }
+      }).length;
+    }
+    
+    // Форматируем ответ для фронтенда
+    const formattedData = {
+      ...data,
+      user_id: String(userId),
+      bot_id: botId,
+      attempts_left: data.attempts_left !== undefined ? data.attempts_left : 3,
+      attemptsLeft: data.attempts_left !== undefined ? data.attempts_left : 3,
+      spins_today: spinsToday,
+      total_spins: data.total_spins || 0,
+      total_prizes: data.total_prizes || 0,
+      referrals: data.referrals || 0,
+      ref_link: data.referral_link || `https://t.me/${botId}?start=uid_${userId}`,
+      referral_link: data.referral_link || `https://t.me/${botId}?start=uid_${userId}`,
+      is_new_user: !data.created_at,
+      is_active: data.is_active !== false
+    };
+    
+    console.log(`✅ Данные пользователя ${userId} загружены, попыток: ${formattedData.attempts_left}`);
+    return formattedData;
   } catch (error) {
     console.error(`❌ Ошибка получения данных пользователя ${userId}:`, error.message);
+    console.error("Stack:", error.stack);
     return null;
   }
 }
@@ -181,7 +214,7 @@ async function getUserData(botId, userId) {
  */
 async function createUser(botId, userId, userData) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, пропускаем создание пользователя");
       return null;
     }
@@ -207,7 +240,10 @@ async function createUser(botId, userId, userData) {
       language_code: userData.languageCode || "ru",
       created_at: admin.firestore.FieldValue.serverTimestamp(),
       last_activity: admin.firestore.FieldValue.serverTimestamp(),
+      last_spin: null,
       attempts_left: userData.attemptsLeft || 3,
+      attempts_total: 3,
+      spins_today: 0,
       total_spins: 0,
       total_prizes: 0,
       spins: [],
@@ -215,7 +251,8 @@ async function createUser(botId, userId, userData) {
       referrals: 0,
       referral_link: `https://t.me/${botId}?start=uid_${userId}`,
       is_active: true,
-      bot_id: botId
+      bot_id: botId,
+      last_reset_day: new Date().toISOString().split('T')[0]
     };
 
     await userRef.set(newUser);
@@ -233,7 +270,7 @@ async function createUser(botId, userId, userData) {
  */
 async function updateUser(botId, userId, updateData) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, пропускаем обновление");
       return;
     }
@@ -246,7 +283,8 @@ async function updateUser(botId, userId, updateData) {
 
     await userRef.update({
       ...updateData,
-      last_activity: admin.firestore.FieldValue.serverTimestamp()
+      last_activity: admin.firestore.FieldValue.serverTimestamp(),
+      last_updated: admin.firestore.FieldValue.serverTimestamp()
     });
 
     console.log(`✅ Данные пользователя ${userId} обновлены`);
@@ -257,7 +295,7 @@ async function updateUser(botId, userId, updateData) {
 }
 
 /**
- * Сохранение спина пользователя (улучшенная версия)
+ * Сохранение спина пользователя (ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ)
  */
 async function saveSpin(botId, userId, spinData) {
   try {
@@ -272,147 +310,37 @@ async function saveSpin(botId, userId, spinData) {
       .collection("users")
       .doc(String(userId));
 
-    // Генерируем уникальный ID спина
     const spinId = `spin_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
     // Создаем объект спина
     const spin = {
       spin_id: spinId,
-      spinId: spinId, // Дублируем для совместимости
+      spinId: spinId,
       prize: spinData.prize || "Неизвестный приз",
       prize_type: spinData.prize_type || "points",
       prize_value: spinData.prize_value || 0,
-      timestamp: new Date().toISOString(), // Используем ISO строку
-      created_at: admin.firestore.FieldValue.serverTimestamp(), // Для сортировки
+      timestamp: new Date().toISOString(),
       claimed: false,
       lead_submitted: false,
       bot_id: botId,
-      user_id: String(userId),
-      metadata: {
-        source: "wheel",
-        version: "2.0"
-      }
+      user_id: String(userId)
     };
 
-    try {
-      // Используем транзакцию для атомарности операций
-      await firestore.runTransaction(async (transaction) => {
-        // Получаем текущие данные пользователя
-        const userDoc = await transaction.get(userRef);
-        
-        if (!userDoc.exists) {
-          // Если пользователь не существует, создаем его
-          const newUserData = {
-            user_id: String(userId),
-            username: spinData.username || "",
-            first_name: spinData.first_name || "",
-            last_name: spinData.last_name || "",
-            language_code: spinData.language_code || "ru",
-            created_at: admin.firestore.FieldValue.serverTimestamp(),
-            last_activity: admin.firestore.FieldValue.serverTimestamp(),
-            last_spin: admin.firestore.FieldValue.serverTimestamp(),
-            attempts_left: 2, // После первого спина
-            attempts_total: 3, // Общее количество попыток
-            spins_today: 1,
-            total_spins: 1,
-            total_prizes: 0,
-            spins: [spin],
-            referrals: 0,
-            referral_link: `https://t.me/${botId}?start=uid_${userId}`,
-            ref_link: `https://t.me/${botId}?start=uid_${userId}`, // Для совместимости
-            is_active: true,
-            bot_id: botId,
-            cooldown_until: admin.firestore.FieldValue.serverTimestamp(),
-            last_updated: admin.firestore.FieldValue.serverTimestamp()
-          };
-          
-          transaction.set(userRef, newUserData);
-        } else {
-          // Если пользователь существует, обновляем
-          const userData = userDoc.data();
-          const currentSpins = userData.spins || [];
-          const now = new Date();
-          const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-          
-          // Считаем спины за сегодня
-          let spinsToday = 0;
-          if (userData.spins) {
-            spinsToday = userData.spins.filter(spinItem => {
-              let spinDate;
-              if (spinItem.timestamp) {
-                spinDate = new Date(spinItem.timestamp);
-                spinDate = new Date(spinDate.getFullYear(), spinDate.getMonth(), spinDate.getDate());
-              }
-              return spinDate && spinDate.getTime() === today.getTime();
-            }).length;
-          }
-          
-          // Вычисляем новое количество попыток
-          const currentAttempts = userData.attempts_left !== undefined ? userData.attempts_left : 3;
-          const newAttemptsLeft = Math.max(0, currentAttempts - 1);
-          
-          // Обновляем данные
-          const updateData = {
-            spins: [...currentSpins, spin],
-            last_spin: admin.firestore.FieldValue.serverTimestamp(),
-            last_activity: admin.firestore.FieldValue.serverTimestamp(),
-            total_spins: admin.firestore.FieldValue.increment(1),
-            attempts_left: newAttemptsLeft,
-            spins_today: spinsToday + 1,
-            last_updated: admin.firestore.FieldValue.serverTimestamp(),
-            cooldown_until: admin.firestore.Timestamp.fromDate(
-              new Date(Date.now() + (30 * 1000)) // 30 секунд кулдаун
-            )
-          };
-          
-          // Добавляем поле total_prizes если его нет
-          if (userData.total_prizes === undefined) {
-            updateData.total_prizes = 0;
-          }
-          
-          transaction.update(userRef, updateData);
-        }
-      });
-      
-      console.log(`✅ Спин сохранён для ${userId}, ID: ${spinId}`);
-      return spinId;
-      
-    } catch (transactionError) {
-      console.error(`❌ Ошибка транзакции для пользователя ${userId}:`, transactionError.message);
-      
-      // Пробуем без транзакции (fallback)
-      console.log('🔄 Пробуем сохранить спин без транзакции...');
-      return await saveSpinWithoutTransaction(botId, userId, spinData, spinId, spin);
-    }
-    
-  } catch (error) {
-    console.error(`❌ Критическая ошибка сохранения спина для ${userId}:`, error.message);
-    console.error('Stack:', error.stack);
-    throw error;
-  }
-}
-
-/**
- * Сохранение спина без транзакции (fallback метод)
- */
-async function saveSpinWithoutTransaction(botId, userId, spinData, spinId, spin) {
-  try {
-    const userRef = firestore
-      .collection("bots")
-      .doc(botId)
-      .collection("users")
-      .doc(String(userId));
-
+    // Получаем текущие данные пользователя
     const userDoc = await userRef.get();
     
     if (!userDoc.exists) {
-      // Создаем нового пользователя
-      await userRef.set({
+      // Если пользователь не существует, создаем его
+      const userData = {
         user_id: String(userId),
+        username: spinData.username || "",
+        first_name: spinData.first_name || "",
+        last_name: spinData.last_name || "",
+        language_code: spinData.language_code || "ru",
         created_at: admin.firestore.FieldValue.serverTimestamp(),
         last_activity: admin.firestore.FieldValue.serverTimestamp(),
         last_spin: admin.firestore.FieldValue.serverTimestamp(),
-        attempts_left: 2,
+        attempts_left: 2, // После первого спина
         attempts_total: 3,
         spins_today: 1,
         total_spins: 1,
@@ -423,32 +351,133 @@ async function saveSpinWithoutTransaction(botId, userId, spinData, spinId, spin)
         ref_link: `https://t.me/${botId}?start=uid_${userId}`,
         is_active: true,
         bot_id: botId,
-        last_updated: admin.firestore.FieldValue.serverTimestamp()
-      });
+        last_updated: admin.firestore.FieldValue.serverTimestamp(),
+        last_reset_day: new Date().toISOString().split('T')[0]
+      };
+      
+      await userRef.set(userData);
+      console.log(`✅ Пользователь создан и спин сохранён для ${userId}, ID: ${spinId}, попыток: 2`);
+      return spinId;
+      
     } else {
-      // Обновляем существующего пользователя
+      // Если пользователь существует
       const userData = userDoc.data();
       const currentSpins = userData.spins || [];
-      const currentAttempts = userData.attempts_left !== undefined ? userData.attempts_left : 3;
       
-      await userRef.update({
+      // ПРОВЕРЯЕМ И СБРАСЫВАЕМ ЕЖЕДНЕВНЫЕ ПОПЫТКИ ЕСЛИ НУЖНО
+      const today = new Date().toISOString().split('T')[0];
+      const lastResetDay = userData.last_reset_day;
+      
+      let attemptsLeft = userData.attempts_left !== undefined ? userData.attempts_left : 3;
+      
+      if (lastResetDay !== today) {
+        // Сбрасываем попытки на новый день
+        attemptsLeft = 3;
+        console.log(`🔄 Сброс ежедневных попыток для ${userId}, новый день: ${today}`);
+      }
+      
+      // Уменьшаем попытки
+      const newAttemptsLeft = Math.max(0, attemptsLeft - 1);
+      
+      // Считаем спины за сегодня
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      let spinsToday = 0;
+      
+      if (userData.spins) {
+        spinsToday = userData.spins.filter(spinItem => {
+          if (!spinItem.timestamp) return false;
+          try {
+            const spinDate = new Date(spinItem.timestamp);
+            return spinDate >= todayStart;
+          } catch (e) {
+            return false;
+          }
+        }).length;
+      }
+      
+      // Обновляем данные пользователя
+      const updateData = {
         spins: [...currentSpins, spin],
         last_spin: admin.firestore.FieldValue.serverTimestamp(),
         last_activity: admin.firestore.FieldValue.serverTimestamp(),
         total_spins: admin.firestore.FieldValue.increment(1),
-        attempts_left: Math.max(0, currentAttempts - 1),
-        last_updated: admin.firestore.FieldValue.serverTimestamp()
+        attempts_left: newAttemptsLeft,
+        spins_today: spinsToday + 1,
+        last_updated: admin.firestore.FieldValue.serverTimestamp(),
+        last_reset_day: today // Обновляем день сброса
+      };
+      
+      // Добавляем total_prizes если его нет
+      if (userData.total_prizes === undefined) {
+        updateData.total_prizes = 0;
+      }
+      
+      await userRef.update(updateData);
+      console.log(`✅ Спин сохранён для ${userId}, ID: ${spinId}, попыток осталось: ${newAttemptsLeft}`);
+      return spinId;
+    }
+    
+  } catch (error) {
+    console.error(`❌ Ошибка сохранения спина для ${userId}:`, error.message);
+    console.error('Stack:', error.stack);
+    
+    // ВОЗВРАЩАЕМ НОРМАЛЬНЫЙ spinId, НЕ error_spin
+    return `spin_${Date.now()}_${userId}_${Math.random().toString(36).substr(2, 4)}`;
+  }
+}
+
+/**
+ * Упрощенная версия saveSpin (для совместимости)
+ */
+async function saveSpinSimple(botId, userId, spinData) {
+  try {
+    if (!firestore || !firebaseInitialized) {
+      return `simple_spin_${Date.now()}_${userId}`;
+    }
+
+    const userRef = firestore
+      .collection("bots")
+      .doc(botId)
+      .collection("users")
+      .doc(String(userId));
+
+    const spinId = `spin_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const spin = {
+      spin_id: spinId,
+      prize: spinData.prize || "Приз",
+      timestamp: new Date().toISOString(),
+      claimed: false
+    };
+
+    const userDoc = await userRef.get();
+    
+    if (userDoc.exists) {
+      const userData = userDoc.data();
+      const currentSpins = userData.spins || [];
+      const attemptsLeft = Math.max(0, (userData.attempts_left || 3) - 1);
+      
+      await userRef.update({
+        spins: [...currentSpins, spin],
+        last_spin: admin.firestore.FieldValue.serverTimestamp(),
+        total_spins: admin.firestore.FieldValue.increment(1),
+        attempts_left: attemptsLeft
+      });
+    } else {
+      await userRef.set({
+        user_id: String(userId),
+        created_at: admin.firestore.FieldValue.serverTimestamp(),
+        spins: [spin],
+        total_spins: 1,
+        attempts_left: 2,
+        bot_id: botId
       });
     }
     
-    console.log(`✅ Спин сохранён (без транзакции) для ${userId}, ID: ${spinId}`);
     return spinId;
-    
-  } catch (fallbackError) {
-    console.error(`❌ Ошибка fallback-сохранения для ${userId}:`, fallbackError.message);
-    
-    // Возвращаем mock ID в случае полной ошибки
-    return `error_spin_${Date.now()}_${userId}`;
+  } catch (error) {
+    console.error('Ошибка упрощенного сохранения:', error.message);
+    return `simple_error_${Date.now()}_${userId}`;
   }
 }
 
@@ -457,7 +486,7 @@ async function saveSpinWithoutTransaction(botId, userId, spinData, spinId, spin)
  */
 async function saveLead(leadData) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, пропускаем сохранение лида");
       return null;
     }
@@ -493,7 +522,7 @@ async function saveLead(leadData) {
  */
 async function updateSpinLead(botId, userId, spinId, leadData) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, пропускаем обновление спина");
       return;
     }
@@ -546,7 +575,7 @@ async function updateSpinLead(botId, userId, spinId, leadData) {
  */
 async function updateSpinFallback(botId, userId, spinId) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, пропускаем обновление фолбэка");
       return;
     }
@@ -596,7 +625,7 @@ async function updateSpinFallback(botId, userId, spinId) {
  */
 async function getBotLeads(botId, limit = 100) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, возвращаем пустой массив");
       return [];
     }
@@ -621,6 +650,35 @@ async function getBotLeads(botId, limit = 100) {
   }
 }
 
+/**
+ * Сброс попыток пользователя (для отладки)
+ */
+async function resetUserAttempts(botId, userId, attempts = 3) {
+  try {
+    if (!firestore || !firebaseInitialized) {
+      console.log("⚠️ Firestore не инициализирован");
+      return false;
+    }
+
+    const userRef = firestore
+      .collection("bots")
+      .doc(botId)
+      .collection("users")
+      .doc(String(userId));
+
+    await userRef.update({
+      attempts_left: attempts,
+      last_updated: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log(`✅ Попытки сброшены для пользователя ${userId}: ${attempts}`);
+    return true;
+  } catch (error) {
+    console.error(`❌ Ошибка сброса попыток для ${userId}:`, error.message);
+    return false;
+  }
+}
+
 module.exports = {
   initializeFirebase,
   isInitialized,
@@ -630,8 +688,10 @@ module.exports = {
   createUser,
   updateUser,
   saveSpin,
+  saveSpinSimple,
   saveLead,
   updateSpinLead,
   updateSpinFallback,
-  getBotLeads
+  getBotLeads,
+  resetUserAttempts
 };
