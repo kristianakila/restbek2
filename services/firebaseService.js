@@ -9,10 +9,20 @@ let firebaseInitialized = false;
 
 /**
  * Инициализация Firebase
- * @returns {boolean} Успешна ли инициализация
+ * @returns {Promise<boolean>} Успешна ли инициализация
  */
-function initializeFirebase() {
+async function initializeFirebase() {  // ДОБАВЬ async здесь!
   try {
+    console.log("🔥 Начинаем инициализацию Firebase...");
+    
+    // Проверяем, инициализирован ли уже Firebase
+    if (admin.apps.length > 0) {
+      console.log("✅ Firebase уже инициализирован");
+      firestore = admin.firestore();
+      firebaseInitialized = true;
+      return true;
+    }
+
     // Вариант 1: Использовать файл сервисного аккаунта
     const serviceAccountPath = path.join(__dirname, "..", "firebasekey.json");
     
@@ -25,13 +35,11 @@ function initializeFirebase() {
         return false;
       }
       
-      if (admin.apps.length === 0) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-          projectId: serviceAccount.project_id
-        });
-        console.log("✅ Firebase Admin SDK инициализирован из файла");
-      }
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: serviceAccount.project_id
+      });
+      console.log("✅ Firebase Admin SDK инициализирован из файла");
     } 
     // Вариант 2: Использовать переменные окружения
     else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
@@ -43,16 +51,18 @@ function initializeFirebase() {
         privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
       };
       
-      if (admin.apps.length === 0) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-          projectId: serviceAccount.projectId
-        });
-        console.log("✅ Firebase Admin SDK инициализирован из env");
-      }
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: serviceAccount.projectId
+      });
+      console.log("✅ Firebase Admin SDK инициализирован из env");
     }
     else {
       console.error("❌ Не найден firebasekey.json и отсутствуют переменные окружения");
+      console.error("   Проверьте наличие файла или установите переменные окружения:");
+      console.error("   - FIREBASE_PROJECT_ID");
+      console.error("   - FIREBASE_CLIENT_EMAIL");
+      console.error("   - FIREBASE_PRIVATE_KEY");
       return false;
     }
     
@@ -65,15 +75,24 @@ function initializeFirebase() {
       timestampsInSnapshots: true
     });
     
-    // Тестовое соединение
-    const testDoc = firestore.collection("test").doc("connection");
-    await testDoc.set({ test: true, timestamp: admin.firestore.FieldValue.serverTimestamp() });
-    await testDoc.delete();
+    // Тестовое соединение - УБЕРИТЕ await или сделайте вызов без await
+    // Но сначала просто попробуйте подключиться без тестового запроса
+    console.log("🔄 Подключаемся к Firestore...");
     
-    firebaseInitialized = true;
-    console.log("🔥 Firestore успешно подключен и протестирован");
+    // Простая проверка подключения
+    try {
+      // Просто получаем доступ к коллекции, не создавая документ
+      await firestore.listCollections();
+      console.log("✅ Firestore успешно подключен");
+      
+      firebaseInitialized = true;
+      return true;
+    } catch (error) {
+      console.error("❌ Ошибка подключения к Firestore:", error.message);
+      console.error("Stack:", error.stack);
+      return false;
+    }
     
-    return true;
   } catch (error) {
     console.error("❌ Ошибка инициализации Firebase:", error.message);
     console.error("Stack:", error.stack);
@@ -100,21 +119,23 @@ function getDatabase() {
  */
 async function getBotConfig(botId) {
   try {
-    if (!firestore) {
+    if (!firestore || !firebaseInitialized) {
       console.log("⚠️ Firestore не инициализирован, возвращаем null");
       return null;
     }
 
+    console.log(`🔍 Ищем конфигурацию бота ${botId} в Firestore...`);
+    
     const docRef = firestore.collection("bots").doc(botId);
     const doc = await docRef.get();
 
     if (!doc.exists) {
-      console.log(`❌ Конфигурация бота ${botId} не найдена`);
+      console.log(`❌ Конфигурация бота ${botId} не найдена в Firestore`);
       return null;
     }
 
     const data = doc.data();
-    console.log(`✅ Конфигурация бота ${botId} загружена`);
+    console.log(`✅ Конфигурация бота ${botId} загружена из Firestore`);
     return data;
   } catch (error) {
     console.error(`❌ Ошибка получения конфигурации бота ${botId}:`, error.message);
