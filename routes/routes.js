@@ -369,16 +369,35 @@ router.post("/api/lead-fallback",
 // 6. Конфигурация колеса
 router.get("/api/wheel-config", async (req, res) => {
   try {
-    const botId = req.botId;
-    console.log("⚙️ /api/wheel-config called", { botId });
+    const botId = req.botId || req.query.bot_id;
+    console.log("⚙️ /api/wheel-config called", { 
+      botId,
+      headers: req.headers,
+      query: req.query 
+    });
+    
+    if (!botId) {
+      return res.status(400).json({
+        success: false,
+        error: "Bot ID is required",
+        code: "BOT_ID_REQUIRED"
+      });
+    }
     
     const botConfig = await firebaseService.getBotConfig(botId);
+    console.log("🔥 Bot config from Firebase:", botConfig);
     
-    if (!botConfig && firebaseService.isInitialized()) {
-      return res.status(404).json({
-        success: false,
-        error: "Bot configuration not found",
-        code: "BOT_NOT_FOUND"
+    if (!botConfig) {
+      // Если бот не найден, возвращаем дефолтную конфигурацию
+      console.log("⚠️ Bot not found, returning default config");
+      const defaultWheelConfig = getWheelConfig(null);
+      
+      return res.json({
+        success: true,
+        bot_id: botId,
+        items: defaultWheelConfig,
+        is_default: true,
+        timestamp: new Date().toISOString()
       });
     }
     
@@ -389,6 +408,7 @@ router.get("/api/wheel-config", async (req, res) => {
       success: true,
       bot_id: botId,
       items: wheelConfig,
+      is_default: false,
       timestamp: new Date().toISOString()
     });
     
@@ -396,7 +416,8 @@ router.get("/api/wheel-config", async (req, res) => {
     console.error("❌ Ошибка в /api/wheel-config:", error);
     res.status(500).json({
       success: false,
-      error: "Internal server error"
+      error: "Internal server error",
+      message: error.message
     });
   }
 });
