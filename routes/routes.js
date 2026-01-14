@@ -224,7 +224,7 @@ router.post("/api/check-subscription",
   }
 );
 
-// 3. Вращение колеса (два пути для совместимости)
+// 3. Вращение колеса (два пути для совместимости) - БЕЗ КУЛДАУНА
 router.post("/api/spin",
   middleware.validateFields(["userId"]),
   async (req, res) => {
@@ -276,8 +276,8 @@ router.post("/api/spin",
           attemptsLeft: 2,
           spins_today: 1,
           total_spins: 1,
-          cooldown: botConfig?.limits?.cooldownSeconds || 30,
-          cooldown_until: new Date(Date.now() + (botConfig?.limits?.cooldownSeconds || 30) * 1000).toISOString(),
+          cooldown: 0, // КУЛДАУН ВЫКЛЮЧЕН
+          cooldown_until: new Date().toISOString(), // Текущее время
           message: "Spin successful (mock mode)",
           metadata: {
             is_fallback: true,
@@ -311,7 +311,6 @@ router.post("/api/spin",
       }).length : 0;
       
       const maxSpinsPerDay = botConfig?.limits?.spinsPerDay || 3;
-      const cooldownSeconds = botConfig?.limits?.cooldownSeconds || 30;
       
       // Проверяем дневной лимит
       if (spinsToday >= maxSpinsPerDay) {
@@ -336,7 +335,9 @@ router.post("/api/spin",
         });
       }
       
-      // Проверяем кулдаун
+      // ВЫКЛЮЧАЕМ ПРОВЕРКУ КУЛДАУНА - КОММЕНТИРУЕМ ВЕСЬ БЛОК
+      /*
+      // Проверяем кулдаун - ВЫКЛЮЧЕНО ДЛЯ ТЕСТИРОВАНИЯ
       if (userData.last_spin) {
         let lastSpinTime;
         
@@ -366,6 +367,7 @@ router.post("/api/spin",
           });
         }
       }
+      */
       
       // Выбираем приз
       const prize = selectPrize(botConfig);
@@ -374,7 +376,8 @@ router.post("/api/spin",
       const spinId = await firebaseService.saveSpin(botId, userId, { 
         prize: prize.label,
         prize_type: prize.type || 'points',
-        prize_value: prize.value || 0
+        prize_value: prize.value || 0,
+        username: username || ""
       });
       
       // Получаем обновленные данные пользователя
@@ -387,6 +390,7 @@ router.post("/api/spin",
       
       const newTotalSpins = updatedUserData.total_spins || (userData.total_spins || 0) + 1;
       
+      // ВОЗВРАЩАЕМ УСПЕШНЫЙ ОТВЕТ С КУЛДАУНОМ = 0
       res.json({
         success: true,
         spin_id: spinId,
@@ -396,8 +400,8 @@ router.post("/api/spin",
         attemptsLeft: newAttemptsLeft,
         spins_today: spinsToday + 1,
         total_spins: newTotalSpins,
-        cooldown: cooldownSeconds,
-        cooldown_until: new Date(Date.now() + cooldownSeconds * 1000).toISOString(),
+        cooldown: 0, // КУЛДАУН ВЫКЛЮЧЕН
+        cooldown_until: new Date().toISOString(), // Текущее время
         message: "Spin successful",
         metadata: {
           is_fallback: false,
@@ -428,8 +432,8 @@ router.post("/api/spin",
           attemptsLeft: 2,
           spins_today: 1,
           total_spins: 1,
-          cooldown: 30,
-          cooldown_until: new Date(Date.now() + 30000).toISOString(),
+          cooldown: 0, // КУЛДАУН ВЫКЛЮЧЕН
+          cooldown_until: new Date().toISOString(), // Текущее время
           message: "Spin successful (fallback mode)",
           metadata: {
             is_fallback: true,
@@ -478,7 +482,6 @@ function selectPrize(botConfig) {
   const randomIndex = Math.floor(Math.random() * defaultPrizes.length);
   return defaultPrizes[randomIndex];
 }
-
 // 4. Отправка лида
 router.post("/api/submit-lead",
   middleware.validateFields(["userId", "spinId"]),
