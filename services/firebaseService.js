@@ -8,38 +8,42 @@ let firebaseInitialized = false;
 
 /**
  * Инициализация Firebase
+ * @returns {boolean} Успешна ли инициализация
  */
 function initializeFirebase() {
   try {
-    if (!process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-      console.log("⚠️ FIREBASE_SERVICE_ACCOUNT_KEY не установлен, Firebase отключен");
+    const serviceAccountPath = path.join(__dirname, "..", "firebasekey.json");
+    
+    if (!fs.existsSync(serviceAccountPath)) {
+      console.error("❌ Файл firebasekey.json не найден:", serviceAccountPath);
       return false;
     }
-
-    if (firebaseApp) {
-      console.log("✅ Firebase уже инициализирован");
-      return true;
-    }
-
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-
-    firebaseApp = admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-
-    firestore = admin.firestore();
     
-    // Настройки Firestore
-    firestore.settings({
-      ignoreUndefinedProperties: true
-    });
-
-    console.log("✅ Firebase успешно инициализирован");
+    const serviceAccount = require(serviceAccountPath);
+    
+    if (!serviceAccount.project_id) {
+      console.error("❌ В firebasekey.json отсутствует project_id");
+      return false;
+    }
+    
+    if (admin.apps.length === 0) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: serviceAccount.project_id
+      });
+      
+      console.log("✅ Firebase Admin SDK инициализирован");
+    }
+    
+    db = admin.firestore();
+    db.settings({ ignoreUndefinedProperties: true });
+    
     firebaseInitialized = true;
+    console.log("🔥 Firestore подключен");
+    
     return true;
   } catch (error) {
     console.error("❌ Ошибка инициализации Firebase:", error.message);
-    firebaseInitialized = false;
     return false;
   }
 }
