@@ -259,6 +259,9 @@ async function updateUser(botId, userId, updateData) {
 /**
  * Сохранение спина пользователя
  */
+/**
+ * Сохранение спина пользователя
+ */
 async function saveSpin(botId, userId, spinData) {
   try {
     if (!firestore) {
@@ -273,57 +276,56 @@ async function saveSpin(botId, userId, spinData) {
       .doc(String(userId));
 
     const spinId = `spin_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // ВАЖНО: НЕ используем FieldValue.serverTimestamp() внутри объекта спина!
+    // Используем обычную дату
     const spin = {
       spin_id: spinId,
       prize: spinData.prize || "Неизвестный приз",
       prize_type: spinData.prize_type || "points",
       prize_value: spinData.prize_value || 0,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      timestamp: new Date().toISOString(), // Используем ISO строку вместо FieldValue
       claimed: false,
       lead_submitted: false,
       bot_id: botId,
       user_id: userId
     };
 
-    // Используем транзакцию для атомарного обновления
-    await firestore.runTransaction(async (transaction) => {
-      const userDoc = await transaction.get(userRef);
-      let currentSpins = [];
+    // Получаем текущие данные пользователя
+    const userDoc = await userRef.get();
+    
+    if (!userDoc.exists) {
+      // Если пользователь не существует, создаем его
+      await userRef.set({
+        user_id: String(userId),
+        created_at: admin.firestore.FieldValue.serverTimestamp(),
+        last_activity: admin.firestore.FieldValue.serverTimestamp(),
+        attempts_left: 2, // После одного спина
+        total_spins: 1,
+        total_prizes: 0,
+        spins: [spin], // Массив с одним спин-объектом
+        referrals: 0,
+        referral_link: `https://t.me/${botId}?start=uid_${userId}`,
+        is_active: true,
+        bot_id: botId
+      });
+    } else {
+      // Если пользователь существует, обновляем
+      const userData = userDoc.data();
+      const currentSpins = userData.spins || [];
       
-      if (userDoc.exists) {
-        const userData = userDoc.data();
-        currentSpins = userData.spins || [];
-        
-        // Уменьшаем количество попыток
-        const attemptsLeft = Math.max(0, (userData.attempts_left || 0) - 1);
-        
-        transaction.update(userRef, {
-          spins: [...currentSpins, spin],
-          last_spin: admin.firestore.FieldValue.serverTimestamp(),
-          total_spins: admin.firestore.FieldValue.increment(1),
-          attempts_left: attemptsLeft,
-          last_activity: admin.firestore.FieldValue.serverTimestamp()
-        });
-      } else {
-        // Если пользователь не существует, создаем его
-        transaction.set(userRef, {
-          user_id: String(userId),
-          created_at: admin.firestore.FieldValue.serverTimestamp(),
-          last_activity: admin.firestore.FieldValue.serverTimestamp(),
-          attempts_left: 2, // После одного спина
-          total_spins: 1,
-          total_prizes: 0,
-          spins: [spin],
-          referrals: 0,
-          referral_link: `https://t.me/${botId}?start=uid_${userId}`,
-          is_active: true,
-          bot_id: botId
-        });
-      }
-    });
+      await userRef.update({
+        spins: [...currentSpins, spin], // Добавляем новый спин в массив
+        last_spin: admin.firestore.FieldValue.serverTimestamp(),
+        last_activity: admin.firestore.FieldValue.serverTimestamp(),
+        total_spins: admin.firestore.FieldValue.increment(1),
+        attempts_left: Math.max(0, (userData.attempts_left || 0) - 1)
+      });
+    }
 
     console.log(`✅ Спин сохранён для ${userId}, ID: ${spinId}`);
     return spinId;
+    
   } catch (error) {
     console.error(`❌ Ошибка сохранения спина для ${userId}:`, error.message);
     throw error;
