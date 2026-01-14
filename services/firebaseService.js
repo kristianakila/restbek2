@@ -1,6 +1,7 @@
-// services/firebaseService.js - полный исправленный файл
-
+// services/firebaseService.js - исправленная версия
 const admin = require("firebase-admin");
+const path = require("path");
+const fs = require("fs");
 
 let firebaseApp = null;
 let firestore = null;
@@ -12,38 +13,70 @@ let firebaseInitialized = false;
  */
 function initializeFirebase() {
   try {
+    // Вариант 1: Использовать файл сервисного аккаунта
     const serviceAccountPath = path.join(__dirname, "..", "firebasekey.json");
     
-    if (!fs.existsSync(serviceAccountPath)) {
-      console.error("❌ Файл firebasekey.json не найден:", serviceAccountPath);
-      return false;
-    }
-    
-    const serviceAccount = require(serviceAccountPath);
-    
-    if (!serviceAccount.project_id) {
-      console.error("❌ В firebasekey.json отсутствует project_id");
-      return false;
-    }
-    
-    if (admin.apps.length === 0) {
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        projectId: serviceAccount.project_id
-      });
+    if (fs.existsSync(serviceAccountPath)) {
+      console.log("📁 Найден файл firebasekey.json");
+      const serviceAccount = require(serviceAccountPath);
       
-      console.log("✅ Firebase Admin SDK инициализирован");
+      if (!serviceAccount.project_id) {
+        console.error("❌ В firebasekey.json отсутствует project_id");
+        return false;
+      }
+      
+      if (admin.apps.length === 0) {
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: serviceAccount.project_id
+        });
+        console.log("✅ Firebase Admin SDK инициализирован из файла");
+      }
+    } 
+    // Вариант 2: Использовать переменные окружения
+    else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+      console.log("🌐 Используем переменные окружения для Firebase");
+      
+      const serviceAccount = {
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+      };
+      
+      if (admin.apps.length === 0) {
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: serviceAccount.projectId
+        });
+        console.log("✅ Firebase Admin SDK инициализирован из env");
+      }
+    }
+    else {
+      console.error("❌ Не найден firebasekey.json и отсутствуют переменные окружения");
+      return false;
     }
     
-    db = admin.firestore();
-    db.settings({ ignoreUndefinedProperties: true });
+    // Инициализируем Firestore
+    firestore = admin.firestore();
+    
+    // Настройки Firestore
+    firestore.settings({ 
+      ignoreUndefinedProperties: true,
+      timestampsInSnapshots: true
+    });
+    
+    // Тестовое соединение
+    const testDoc = firestore.collection("test").doc("connection");
+    await testDoc.set({ test: true, timestamp: admin.firestore.FieldValue.serverTimestamp() });
+    await testDoc.delete();
     
     firebaseInitialized = true;
-    console.log("🔥 Firestore подключен");
+    console.log("🔥 Firestore успешно подключен и протестирован");
     
     return true;
   } catch (error) {
     console.error("❌ Ошибка инициализации Firebase:", error.message);
+    console.error("Stack:", error.stack);
     return false;
   }
 }
@@ -80,9 +113,12 @@ async function getBotConfig(botId) {
       return null;
     }
 
-    return doc.data();
+    const data = doc.data();
+    console.log(`✅ Конфигурация бота ${botId} загружена`);
+    return data;
   } catch (error) {
     console.error(`❌ Ошибка получения конфигурации бота ${botId}:`, error.message);
+    console.error("Stack:", error.stack);
     return null;
   }
 }
@@ -110,7 +146,9 @@ async function getUserData(botId, userId) {
       return null;
     }
 
-    return userDoc.data();
+    const data = userDoc.data();
+    console.log(`✅ Данные пользователя ${userId} загружены`);
+    return data;
   } catch (error) {
     console.error(`❌ Ошибка получения данных пользователя ${userId}:`, error.message);
     return null;
@@ -133,6 +171,13 @@ async function createUser(botId, userId, userData) {
       .collection("users")
       .doc(String(userId));
 
+    // Проверяем, не существует ли уже пользователь
+    const existingUser = await userRef.get();
+    if (existingUser.exists) {
+      console.log(`ℹ️ Пользователь ${userId} уже существует`);
+      return existingUser.data();
+    }
+
     const newUser = {
       user_id: String(userId),
       username: userData.username || "",
@@ -148,7 +193,8 @@ async function createUser(botId, userId, userData) {
       invited_users: [],
       referrals: 0,
       referral_link: `https://t.me/${botId}?start=uid_${userId}`,
-      is_active: true
+      is_active: true,
+      bot_id: botId
     };
 
     await userRef.set(newUser);
@@ -190,7 +236,7 @@ async function updateUser(botId, userId, updateData) {
 }
 
 /**
- * Сохранение спина пользователя (ИСПРАВЛЕННАЯ ФУНКЦИЯ)
+ * Сохранение спина пользователя
  */
 async function saveSpin(botId, userId, spinData) {
   try {
@@ -205,33 +251,54 @@ async function saveSpin(botId, userId, spinData) {
       .collection("users")
       .doc(String(userId));
 
-    // Создаём объект спина с обычной датой
     const spinId = `spin_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const spin = {
       spin_id: spinId,
-      prize: spinData.prize || {},
-      timestamp: new Date().toISOString(), // Используем ISO строку вместо FieldValue.serverTimestamp()
+      prize: spinData.prize || "Неизвестный приз",
+      prize_type: spinData.prize_type || "points",
+      prize_value: spinData.prize_value || 0,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
       claimed: false,
-      lead_submitted: false
+      lead_submitted: false,
+      bot_id: botId,
+      user_id: userId
     };
 
-    // Получаем текущие данные пользователя
-    const userDoc = await userRef.get();
-    let currentSpins = [];
-    
-    if (userDoc.exists) {
-      const userData = userDoc.data();
-      currentSpins = userData.spins || [];
-    }
-
-    // Добавляем новый спин
-    currentSpins.push(spin);
-
-    // Обновляем документ пользователя
-    await userRef.update({
-      spins: currentSpins, // Просто присваиваем новый массив
-      last_spin: admin.firestore.FieldValue.serverTimestamp(),
-      total_spins: admin.firestore.FieldValue.increment(1)
+    // Используем транзакцию для атомарного обновления
+    await firestore.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      let currentSpins = [];
+      
+      if (userDoc.exists) {
+        const userData = userDoc.data();
+        currentSpins = userData.spins || [];
+        
+        // Уменьшаем количество попыток
+        const attemptsLeft = Math.max(0, (userData.attempts_left || 0) - 1);
+        
+        transaction.update(userRef, {
+          spins: [...currentSpins, spin],
+          last_spin: admin.firestore.FieldValue.serverTimestamp(),
+          total_spins: admin.firestore.FieldValue.increment(1),
+          attempts_left: attemptsLeft,
+          last_activity: admin.firestore.FieldValue.serverTimestamp()
+        });
+      } else {
+        // Если пользователь не существует, создаем его
+        transaction.set(userRef, {
+          user_id: String(userId),
+          created_at: admin.firestore.FieldValue.serverTimestamp(),
+          last_activity: admin.firestore.FieldValue.serverTimestamp(),
+          attempts_left: 2, // После одного спина
+          total_spins: 1,
+          total_prizes: 0,
+          spins: [spin],
+          referrals: 0,
+          referral_link: `https://t.me/${botId}?start=uid_${userId}`,
+          is_active: true,
+          bot_id: botId
+        });
+      }
     });
 
     console.log(`✅ Спин сохранён для ${userId}, ID: ${spinId}`);
@@ -243,7 +310,7 @@ async function saveSpin(botId, userId, spinData) {
 }
 
 /**
- * Сохранение лида (НОВАЯ ФУНКЦИЯ)
+ * Сохранение лида
  */
 async function saveLead(leadData) {
   try {
@@ -264,7 +331,8 @@ async function saveLead(leadData) {
       phone: leadData.phone || "",
       submitted_at: admin.firestore.FieldValue.serverTimestamp(),
       status: "new",
-      processed: false
+      processed: false,
+      source: "wheel"
     };
 
     await leadsRef.doc(leadId).set(lead);
@@ -319,7 +387,8 @@ async function updateSpinLead(botId, userId, spinId, leadData) {
 
     await userRef.update({
       spins: updatedSpins,
-      total_prizes: admin.firestore.FieldValue.increment(1)
+      total_prizes: admin.firestore.FieldValue.increment(1),
+      last_activity: admin.firestore.FieldValue.serverTimestamp()
     });
 
     console.log(`✅ Спин ${spinId} обновлен с данными лида`);
@@ -359,14 +428,17 @@ async function updateSpinFallback(botId, userId, spinId) {
           ...spin,
           lead_fallback: true,
           fallback_time: new Date().toISOString(),
-          fallback_reason: "timeout"
+          fallback_reason: "timeout",
+          claimed: true
         };
       }
       return spin;
     });
 
     await userRef.update({
-      spins: updatedSpins
+      spins: updatedSpins,
+      total_prizes: admin.firestore.FieldValue.increment(1),
+      last_activity: admin.firestore.FieldValue.serverTimestamp()
     });
 
     console.log(`✅ Фолбэк применен для спина ${spinId}`);
@@ -398,6 +470,7 @@ async function getBotLeads(botId, limit = 100) {
       leads.push({ id: doc.id, ...doc.data() });
     });
 
+    console.log(`✅ Получено ${leads.length} лидов для бота ${botId}`);
     return leads;
   } catch (error) {
     console.error(`❌ Ошибка получения лидов для бота ${botId}:`, error.message);
@@ -414,7 +487,7 @@ module.exports = {
   createUser,
   updateUser,
   saveSpin,
-  saveLead, // Добавлена эта функция
+  saveLead,
   updateSpinLead,
   updateSpinFallback,
   getBotLeads
