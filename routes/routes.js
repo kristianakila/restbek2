@@ -39,7 +39,7 @@ router.get("/firebase-status", async (req, res) => {
 // =====================================================
 
 // 1. Статус пользователя
-router.post("/user-status", 
+router.post("/api/user-status", 
   middleware.validateFields(["userId"]),
   async (req, res) => {
     try {
@@ -156,7 +156,7 @@ router.post("/user-status",
 );
 
 // 2. Проверка подписки
-router.post("/check-subscription",
+router.post("/api/check-subscription",
   middleware.validateFields(["userId", "channelId"]),
   async (req, res) => {
     try {
@@ -286,7 +286,7 @@ router.post("/spin",
 );
 
 // 4. Отправка лида
-router.post("/submit-lead",
+router.post("/api/submit-lead",
   middleware.validateFields(["userId", "spinId"]),
   async (req, res) => {
     try {
@@ -337,7 +337,7 @@ router.post("/submit-lead",
 );
 
 // 5. Фолбэк для лида
-router.post("/lead-fallback",
+router.post("/api/lead-fallback",
   middleware.validateFields(["userId", "spinId"]),
   async (req, res) => {
     try {
@@ -367,7 +367,7 @@ router.post("/lead-fallback",
 );
 
 // 6. Конфигурация колеса
-router.get("/wheel-config", async (req, res) => {
+router.get("/api/wheel-config", async (req, res) => {
   try {
     const botId = req.botId;
     console.log("⚙️ /api/wheel-config called", { botId });
