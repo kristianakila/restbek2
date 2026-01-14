@@ -229,7 +229,7 @@ router.post("/api/spin",
   middleware.validateFields(["userId"]),
   async (req, res) => {
     try {
-      const { userId, referrerId } = req.body;
+      const { userId, referrerId, username } = req.body;
       const botId = req.botId;
       
       console.log("🎡 /api/spin called", { botId, userId });
@@ -246,48 +246,123 @@ router.post("/api/spin",
       }
       
       // Получаем данные пользователя
-      const userData = await firebaseService.getUserData(botId, userId);
+      let userData = await firebaseService.getUserData(botId, userId);
       
       // Если пользователь не найден, создаем нового
       if (!userData && firebaseService.isInitialized()) {
-        await firebaseService.createUser(botId, userId, {
-          username: req.body.username || "",
+        userData = await firebaseService.createUser(botId, userId, {
+          username: username || "",
+          firstName: req.body.firstName || "",
+          lastName: req.body.lastName || "",
+          languageCode: req.body.languageCode || "ru",
           attemptsLeft: botConfig?.limits?.spinsPerDay || 3
         });
       }
       
-      // Проверяем попытки
-      const today = new Date().toISOString().split('T')[0];
-      const spinsToday = userData?.spins ? userData.spins.filter(spin => {
-        const spinDate = spin.timestamp?.toDate ? 
-          spin.timestamp.toDate().toISOString().split('T')[0] : 
-          new Date(spin.timestamp).toISOString().split('T')[0];
-        return spinDate === today;
+      // Если Firebase не инициализирован, используем mock-данные
+      if (!firebaseService.isInitialized()) {
+        console.log('⚠️ Firestore не инициализирован, используем mock-логику');
+        
+        // Выбираем приз
+        const prize = selectPrize(botConfig);
+        const spinId = `mock_spin_${Date.now()}_${userId}`;
+        
+        return res.json({
+          success: true,
+          spin_id: spinId,
+          spinId: spinId,
+          prize: prize.label,
+          attempts_left: 2, // Mock значение
+          attemptsLeft: 2,
+          spins_today: 1,
+          total_spins: 1,
+          cooldown: botConfig?.limits?.cooldownSeconds || 30,
+          cooldown_until: new Date(Date.now() + (botConfig?.limits?.cooldownSeconds || 30) * 1000).toISOString(),
+          message: "Spin successful (mock mode)",
+          metadata: {
+            is_fallback: true,
+            source: "mock"
+          }
+        });
+      }
+      
+      // Если userData все еще null, создаем простой объект
+      if (!userData) {
+        userData = {
+          spins: [],
+          attempts_left: botConfig?.limits?.spinsPerDay || 3
+        };
+      }
+      
+      // Вычисляем количество спинов за сегодня
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const spinsToday = userData.spins ? userData.spins.filter(spin => {
+        let spinDate;
+        if (spin.timestamp && spin.timestamp.toDate) {
+          spinDate = spin.timestamp.toDate();
+        } else if (spin.timestamp) {
+          spinDate = new Date(spin.timestamp);
+        } else {
+          return false;
+        }
+        return spinDate >= today;
       }).length : 0;
       
       const maxSpinsPerDay = botConfig?.limits?.spinsPerDay || 3;
+      const cooldownSeconds = botConfig?.limits?.cooldownSeconds || 30;
       
+      // Проверяем дневной лимит
       if (spinsToday >= maxSpinsPerDay) {
         return res.status(400).json({
           success: false,
-          error: "Daily spin limit reached",
-          code: "DAILY_LIMIT_REACHED"
+          error: `Daily spin limit reached (${maxSpinsPerDay} per day)`,
+          code: "DAILY_LIMIT_REACHED",
+          max_spins_per_day: maxSpinsPerDay,
+          spins_today: spinsToday,
+          message: `Достигнут дневной лимит: ${maxSpinsPerDay} вращений`
+        });
+      }
+      
+      // Проверяем попытки (attempts_left)
+      if (userData.attempts_left !== undefined && userData.attempts_left <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No attempts left",
+          code: "NO_ATTEMPTS_LEFT",
+          attempts_left: userData.attempts_left,
+          message: "Попытки закончились"
         });
       }
       
       // Проверяем кулдаун
-      if (userData?.last_spin) {
-        const lastSpinTime = userData.last_spin.toDate ? 
-          userData.last_spin.toDate().getTime() : 
-          new Date(userData.last_spin).getTime();
+      if (userData.last_spin) {
+        let lastSpinTime;
         
-        const cooldownMs = (botConfig?.limits?.cooldownSeconds || 3600) * 1000;
+        if (userData.last_spin.toDate) {
+          lastSpinTime = userData.last_spin.toDate().getTime();
+        } else if (userData.last_spin instanceof Date) {
+          lastSpinTime = userData.last_spin.getTime();
+        } else {
+          lastSpinTime = new Date(userData.last_spin).getTime();
+        }
         
-        if (Date.now() < lastSpinTime + cooldownMs) {
+        const cooldownMs = cooldownSeconds * 1000;
+        const now = Date.now();
+        
+        if (now < lastSpinTime + cooldownMs) {
+          const remainingMs = lastSpinTime + cooldownMs - now;
+          const remainingSeconds = Math.ceil(remainingMs / 1000);
+          
           return res.status(400).json({
             success: false,
             error: "Spin cooldown active",
-            code: "SPIN_COOLDOWN"
+            code: "SPIN_COOLDOWN",
+            cooldown_remaining: remainingSeconds,
+            cooldown_seconds: cooldownSeconds,
+            cooldown_until: new Date(lastSpinTime + cooldownMs).toISOString(),
+            message: `Подождите ${remainingSeconds} секунд перед следующим вращением`
           });
         }
       }
@@ -295,35 +370,114 @@ router.post("/api/spin",
       // Выбираем приз
       const prize = selectPrize(botConfig);
       
-      let spinId;
-      if (firebaseService.isInitialized()) {
-        // Сохраняем спин в Firebase
-        spinId = await firebaseService.saveSpin(botId, userId, { prize });
-      } else {
-        // Генерируем тестовый ID спина
-        spinId = `test_spin_${Date.now()}_${userId}`;
-      }
+      // Сохраняем спин в Firebase
+      const spinId = await firebaseService.saveSpin(botId, userId, { 
+        prize: prize.label,
+        prize_type: prize.type || 'points',
+        prize_value: prize.value || 0
+      });
+      
+      // Получаем обновленные данные пользователя
+      const updatedUserData = await firebaseService.getUserData(botId, userId) || {};
+      
+      // Вычисляем новые значения
+      const newAttemptsLeft = updatedUserData.attempts_left !== undefined ? 
+        updatedUserData.attempts_left : 
+        Math.max(0, maxSpinsPerDay - spinsToday - 1);
+      
+      const newTotalSpins = updatedUserData.total_spins || (userData.total_spins || 0) + 1;
       
       res.json({
         success: true,
         spin_id: spinId,
-        spinId: spinId, // Новое поле для совместимости
-        prize: prize.label, // Для совместимости с HTML
-        attempts_left: Math.max(0, maxSpinsPerDay - spinsToday - 1),
-        cooldown: botConfig?.limits?.cooldownSeconds || 3600,
-        message: "Spin successful"
+        spinId: spinId,
+        prize: prize.label,
+        attempts_left: newAttemptsLeft,
+        attemptsLeft: newAttemptsLeft,
+        spins_today: spinsToday + 1,
+        total_spins: newTotalSpins,
+        cooldown: cooldownSeconds,
+        cooldown_until: new Date(Date.now() + cooldownSeconds * 1000).toISOString(),
+        message: "Spin successful",
+        metadata: {
+          is_fallback: false,
+          source: "firebase"
+        }
       });
       
     } catch (error) {
       console.error("❌ Ошибка в /api/spin:", error);
+      console.error("Stack:", error.stack);
+      
+      // Если ошибка связана с Firebase, возвращаем fallback
+      if (error.message.includes('Firestore') || error.message.includes('firebase')) {
+        console.log('⚠️ Ошибка Firebase, используем fallback');
+        
+        const botId = req.botId;
+        const userId = req.body.userId;
+        const botConfig = await firebaseService.getBotConfig(botId);
+        const prize = selectPrize(botConfig);
+        const spinId = `fallback_spin_${Date.now()}_${userId}`;
+        
+        return res.json({
+          success: true,
+          spin_id: spinId,
+          spinId: spinId,
+          prize: prize.label,
+          attempts_left: 2,
+          attemptsLeft: 2,
+          spins_today: 1,
+          total_spins: 1,
+          cooldown: 30,
+          cooldown_until: new Date(Date.now() + 30000).toISOString(),
+          message: "Spin successful (fallback mode)",
+          metadata: {
+            is_fallback: true,
+            source: "firebase_error_fallback",
+            error: error.message
+          }
+        });
+      }
+      
       res.status(500).json({
         success: false,
         error: "Internal server error",
-        code: "SPIN_ERROR"
+        code: "SPIN_ERROR",
+        message: "Произошла внутренняя ошибка сервера"
       });
     }
   }
 );
+
+// Вспомогательная функция для выбора приза
+function selectPrize(botConfig) {
+  // Если есть конфигурация бота, используем её
+  if (botConfig?.wheel?.prizes && botConfig.wheel.prizes.length > 0) {
+    const prizes = botConfig.wheel.prizes;
+    const randomIndex = Math.floor(Math.random() * prizes.length);
+    const selectedPrize = prizes[randomIndex];
+    
+    return {
+      label: selectedPrize.text || selectedPrize.label || "Приз",
+      type: selectedPrize.type || 'points',
+      value: selectedPrize.value || 0,
+      win_text: selectedPrize.description || `Вы выиграли ${selectedPrize.text || "приз"}!`
+    };
+  }
+  
+  // Дефолтные призы
+  const defaultPrizes = [
+    { label: '10 баллов', win_text: 'Поздравляем! Вы выиграли 10 баллов!', value: 10, type: 'points' },
+    { label: '20 баллов', win_text: 'Поздравляем! Вы выиграли 20 баллов!', value: 20, type: 'points' },
+    { label: '30 баллов', win_text: 'Поздравляем! Вы выиграли 30 баллов!', value: 30, type: 'points' },
+    { label: '50 баллов', win_text: 'Поздравляем! Вы выиграли 50 баллов!', value: 50, type: 'points' },
+    { label: '100 баллов', win_text: 'Поздравляем! Вы выиграли 100 баллов!', value: 100, type: 'points' },
+    { label: 'Главный приз', win_text: 'Поздравляем! Вы выиграли главный приз!', value: 500, type: 'points' }
+  ];
+  
+  const randomIndex = Math.floor(Math.random() * defaultPrizes.length);
+  return defaultPrizes[randomIndex];
+}
 
 // 4. Отправка лида
 router.post("/api/submit-lead",
