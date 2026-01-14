@@ -133,12 +133,13 @@ router.post("/api/user-status",
         user_id: userId,
         bot_id: botId,
         attempts_left: attemptsLeft,
-        attemptsLeft, // Новое поле для совместимости с HTML
+        attemptsLeft: attemptsLeft, // Для совместимости с HTML
         spins_today: spinsToday,
         total_spins: userData.total_spins || 0,
         total_prizes: userData.total_prizes || 0,
         referrals: userData.invited_users ? userData.invited_users.length : 0,
-        referral_link: userData.referral_link || `https://t.me/your_bot?start=uid_${userId}`,
+        ref_link: userData.referral_link || `https://t.me/${botConfig?.botUsername || 'your_bot'}?start=uid_${userId}`,
+        referral_link: userData.referral_link || `https://t.me/${botConfig?.botUsername || 'your_bot'}?start=uid_${userId}`,
         cooldown: cooldownRemaining,
         nextSpinAt: nextSpinAt,
         is_new_user: isNewUser
@@ -157,13 +158,36 @@ router.post("/api/user-status",
 
 // 2. Проверка подписки
 router.post("/api/check-subscription",
-  middleware.validateFields(["userId", "channelId"]),
+  middleware.validateFields(["userId"]),
   async (req, res) => {
     try {
-      const { userId, channelId } = req.body;
+      const { userId } = req.body;
       const botId = req.botId;
       
-      console.log("📺 /api/check-subscription called", { botId, userId, channelId });
+      console.log("📺 /api/check-subscription called", { botId, userId });
+      
+      // Получаем конфигурацию бота
+      const botConfig = await firebaseService.getBotConfig(botId);
+      
+      if (!botConfig) {
+        return res.status(404).json({
+          success: false,
+          error: "Bot configuration not found",
+          code: "BOT_NOT_FOUND"
+        });
+      }
+      
+      // Если нет канала в настройках, считаем что подписан
+      if (!botConfig.subscription || !botConfig.subscription.channelUsername) {
+        return res.json({
+          success: true,
+          subscribed: true,
+          channelId: null,
+          status: "not_required",
+          message: "Subscription not required",
+          timestamp: new Date().toISOString()
+        });
+      }
       
       // Здесь должна быть реальная проверка подписки через Telegram API
       // Пока возвращаем заглушку
@@ -171,7 +195,7 @@ router.post("/api/check-subscription",
       res.json({
         success: true,
         subscribed: true, // Заглушка
-        channelId: channelId,
+        channelId: botConfig.subscription.channelUsername,
         status: "member",
         message: "Subscription check successful",
         timestamp: new Date().toISOString()
@@ -187,8 +211,8 @@ router.post("/api/check-subscription",
   }
 );
 
-// 3. Вращение колеса
-router.post("/spin",
+// 3. Вращение колеса (два пути для совместимости)
+router.post("/api/spin",
   middleware.validateFields(["userId"]),
   async (req, res) => {
     try {
@@ -200,14 +224,22 @@ router.post("/spin",
       // Получаем конфигурацию бота
       const botConfig = await firebaseService.getBotConfig(botId);
       
+      if (!botConfig && firebaseService.isInitialized()) {
+        return res.status(404).json({
+          success: false,
+          error: "Bot configuration not found",
+          code: "BOT_NOT_FOUND"
+        });
+      }
+      
       // Получаем данные пользователя
       const userData = await firebaseService.getUserData(botId, userId);
       
+      // Если пользователь не найден, создаем нового
       if (!userData && firebaseService.isInitialized()) {
-        return res.status(404).json({
-          success: false,
-          error: "User not found",
-          code: "USER_NOT_FOUND"
+        await firebaseService.createUser(botId, userId, {
+          username: req.body.username || "",
+          attemptsLeft: botConfig?.limits?.spinsPerDay || 3
         });
       }
       
@@ -263,12 +295,7 @@ router.post("/spin",
         success: true,
         spin_id: spinId,
         spinId: spinId, // Новое поле для совместимости
-        prize: {
-          label: prize.label,
-          value: prize.value,
-          type: prize.type,
-          winText: prize.winText || `Вы выиграли ${prize.label}!`
-        },
+        prize: prize.label, // Для совместимости с HTML
         attempts_left: Math.max(0, maxSpinsPerDay - spinsToday - 1),
         cooldown: botConfig?.limits?.cooldownSeconds || 3600,
         message: "Spin successful"
@@ -385,7 +412,6 @@ router.get("/api/wheel-config", async (req, res) => {
     }
     
     const botConfig = await firebaseService.getBotConfig(botId);
-    console.log("🔥 Bot config from Firebase:", botConfig);
     
     if (!botConfig) {
       // Если бот не найден, возвращаем дефолтную конфигурацию
@@ -479,7 +505,7 @@ function getWheelConfig(botConfig) {
   
   return prizes.map(prize => ({
     label: prize.text,
-    win_text: `Поздравляем! Вы выиграли ${prize.text}!`,
+    win_text: prize.description || `Поздравляем! Вы выиграли ${prize.text}!`,
     value: prize.value,
     type: prize.type || "points",
     color: prize.color || "#3b82f6"
