@@ -195,59 +195,63 @@ async function updateUser(botId, userId, updates) {
  * @param {Object} spinData - Данные спина
  * @returns {Promise<string>} ID спина
  */
+// services/firebaseService.js - исправленная функция saveSpin
+
+// services/firebaseService.js - альтернативный вариант
+
+/**
+ * Сохраняет информацию о спине пользователя
+ */
 async function saveSpin(botId, userId, spinData) {
-  if (!firebaseInitialized || !db) {
-    throw new Error("Firebase не инициализирован");
-  }
-  
   try {
-    const userRef = db.collection("bots").doc(botId).collection("users").doc(userId);
+    if (!firestore) {
+      console.log("⚠️ Firestore не инициализирован, пропускаем сохранение спина");
+      return `mock_spin_${Date.now()}_${userId}`;
+    }
+
+    const userRef = firestore
+      .collection("bots")
+      .doc(botId)
+      .collection("users")
+      .doc(String(userId));
+
+    // Создаём объект спина
     const spinId = `spin_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    const spinRecord = {
+    // Создаем спин с обычным timestamp (ISO строка или Timestamp)
+    const spin = {
       spin_id: spinId,
-      prize_label: spinData.prize.label,
-      prize_value: spinData.prize.value,
-      prize_type: spinData.prize.type,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      prize: spinData.prize || {},
+      timestamp: new Date().toISOString(), // Используем ISO строку
       claimed: false,
       lead_submitted: false
     };
-    
-    await userRef.update({
-      spins: admin.firestore.FieldValue.arrayUnion(spinRecord),
-      total_spins: admin.firestore.FieldValue.increment(1),
-      last_spin: admin.firestore.FieldValue.serverTimestamp(),
-      attempts_left: admin.firestore.FieldValue.increment(-1)
+
+    // Используем транзакцию для атомарного обновления
+    await firestore.runTransaction(async (transaction) => {
+      // Получаем текущие данные
+      const userDoc = await transaction.get(userRef);
+      let currentSpins = [];
+      
+      if (userDoc.exists) {
+        currentSpins = userDoc.data().spins || [];
+      }
+      
+      // Добавляем новый спин
+      currentSpins.push(spin);
+      
+      // Обновляем документ
+      transaction.update(userRef, {
+        spins: currentSpins,
+        last_spin: firestore.FieldValue.serverTimestamp(),
+        total_spins: firestore.FieldValue.increment(1)
+      });
     });
-    
+
+    console.log(`✅ Спин сохранён для ${userId}, ID: ${spinId}`);
     return spinId;
   } catch (error) {
     console.error(`❌ Ошибка сохранения спина для ${userId}:`, error.message);
-    throw error;
-  }
-}
-
-/**
- * Сохранение лида
- * @param {Object} leadData - Данные лида
- * @returns {Promise<string>} ID лида
- */
-async function saveLead(leadData) {
-  if (!firebaseInitialized || !db) {
-    throw new Error("Firebase не инициализирован");
-  }
-  
-  try {
-    const leadsRef = db.collection("leads");
-    const leadDoc = await leadsRef.add({
-      ...leadData,
-      submitted_at: admin.firestore.FieldValue.serverTimestamp()
-    });
-    
-    return leadDoc.id;
-  } catch (error) {
-    console.error("❌ Ошибка сохранения лида:", error.message);
     throw error;
   }
 }
